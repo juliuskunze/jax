@@ -1013,17 +1013,17 @@ def _parallelize(fun):
 
   return pfun
 
+def mask(fun, in_shapes, out_shape=None):
+  unique_ids = _UniqueIds()
 
-def mask(fun, in_shapes, out_shape):
   in_specs, in_shapes_tree = tree_flatten(in_shapes)
-  out_specs, out_shapes_tree = tree_flatten(out_shape)
-
   in_specs = map(_parse_shape_spec, in_specs)
-  out_specs = map(_parse_shape_spec, out_specs)
-
-  unique_ids = collections.defaultdict(object)
   in_specs  = map(partial(_remap_ids, unique_ids), in_specs)
-  out_specs = map(partial(_remap_ids, unique_ids), out_specs)
+
+  if out_shape:
+    out_specs, out_shapes_tree = tree_flatten(out_shape)
+    out_specs = map(_parse_shape_spec, out_specs)
+    out_specs = map(partial(_remap_ids, unique_ids), out_specs)
 
   def wrapped_fun(args, logical_env):
     args_flat, in_tree = tree_flatten(args)
@@ -1033,17 +1033,37 @@ def mask(fun, in_shapes, out_shape):
     padded_env = _bind_shapes(in_shapes, [x.shape for x in args_flat])
     f = lu.wrap_init(fun)
     flat_fun, out_tree = flatten_fun_nokwargs(f, in_tree)
-    outs, out_shapes_ = masking.mask_fun(
+    outs, out_shapes = masking.mask_fun(
         flat_fun, logical_env, padded_env, args_flat, in_shapes)
-    if not out_tree() == out_shapes_tree: raise TypeError("pytree mismatch")
-    out_shapes = map(_finalize_shape_spec, out_specs, map(onp.shape, outs))
-    if not out_shapes == list(out_shapes_):
-      raise ShapeError
-    if not all(onp.shape(out) == eval_polymorphic_shape(shape, padded_env)
-               for out, shape in zip(outs, out_shapes)):
-      raise ShapeError
+
+    if out_shape:
+      if not out_tree() == out_shapes_tree: raise TypeError("pytree mismatch")
+      out_shapes_ = map(_finalize_shape_spec, out_specs, map(onp.shape, outs))
+      if not out_shapes_ == list(out_shapes):
+        raise ShapeError("Output shapes should be {} but are {}.".format(out_shapes_, list(out_shapes)))
+
+      padded_out_shapes = map(onp.shape, outs)
+      padded_out_shapes_ = map(partial(eval_polymorphic_shape, values_dict=padded_env), out_shapes_)
+      if not all(shape_ == shape for shape_, shape in zip(padded_out_shapes_, padded_out_shapes)):
+        raise ShapeError("Padded output shapes should be {} but are {}.".format(padded_out_shapes_, padded_out_shapes))
     return tree_unflatten(out_tree(), outs)
   return wrapped_fun
+
+class _UniqueId:
+  def __init__(self, name):
+    self.name = name
+
+  def __repr__(self):
+    return self.name
+
+  def __lt__(self, other):
+    return self.name < other.name
+
+class _UniqueIds(dict):
+  def __missing__(self, key):
+    unique_id = _UniqueId(key)
+    self[key] = unique_id
+    return unique_id
 
 def _remap_ids(names, shape_spec):
   return ShapeSpec(Poly({Mon({names[id] : deg for id, deg in mon.items()})
@@ -1051,15 +1071,17 @@ def _remap_ids(names, shape_spec):
                    if poly is not _monomorphic_dim else
                    _monomorphic_dim for poly in shape_spec)
 
-def _bind_shapes(shape_exprs, shapes):
+def _bind_shapes(polymorphic_shapes, shapes):
   env = {}
-  for shape_expr, shape in zip(shape_exprs, shapes):
-    for poly, d in zip(shape_expr, shape):
+  for polymorphic_shape, shape in zip(polymorphic_shapes, shapes):
+    for poly, d in zip(polymorphic_shape, shape):
       if type(poly) is not Poly or poly.is_constant:
-        continue
+        if int(poly) != d: raise ShapeError
       else:
-        (binder,), = poly  # TODO generalize to handle striding
-        if env.setdefault(binder, d) != d: raise ShapeError
+        ((id,), count), = poly.items()
+        d, r = divmod(d, count)
+        assert r == 0
+        if env.setdefault(id, d) != d: raise ShapeError
   return env
 
 

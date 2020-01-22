@@ -22,6 +22,7 @@ import scipy.special as osp_special
 from .. import lax
 from .. import util
 from ..api import custom_transforms, defjvp
+from ..interpreters import masking
 from ..numpy import lax_numpy as np
 from ..numpy.lax_numpy import (_wraps, asarray, _reduction_dims, _constant_like,
                                _promote_args_inexact)
@@ -84,7 +85,7 @@ def expit(x):
   one = lax._const(x, 1)
   return lax.div(one, lax.add(one, lax.exp(lax.neg(x))))
 defjvp(expit, lambda g, ans, x: g * ans * (lax._const(ans, 1) - ans))
-
+masking.defvectorized(expit.prim)
 
 @_wraps(osp_special.logsumexp)
 def logsumexp(a, axis=None, b=None, keepdims=False, return_sign=False):

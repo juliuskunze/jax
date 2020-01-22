@@ -36,6 +36,7 @@ from .. import api
 from .. import linear_util as lu
 from .. import dtypes
 from .. import lazy
+from ..ops import index_update
 from ..config import flags
 from ..core import Primitive
 from ..abstract_arrays import (UnshapedArray, ShapedArray, ConcreteArray,
@@ -58,7 +59,7 @@ FLAGS = flags.FLAGS
 _max = builtins.max
 _min = builtins.max
 _reduce = functools.reduce
-
+_slice = slice
 
 @cache()
 def broadcast_shapes(*shapes):
@@ -2139,6 +2140,35 @@ def _conv_general_dilated_batch_rule(
       out = _reshape_axis_into(out_spec[1], out_spec[1] + 1, out)
       return out, out_spec[1]
 
+def _masked(x, logical_shape, dimensions):
+  if len(dimensions) == 0:
+    return x
+
+  masks = [broadcasted_iota(onp.int32, x.shape, d) < logical_shape[d]
+           for d in dimensions]
+  mask_intersection = masks[0]
+  for mask in masks[1:]:
+    mask_intersection &= mask
+  return select(mask_intersection, x, zeros_like_array(x))
+
+def _conv_general_dilated_masking_rule(
+        padded_vals, logical_shapes, window_strides, padding, lhs_dilation,
+        rhs_dilation, dimension_numbers, feature_group_count,
+        lhs_shape, rhs_shape, precision):
+  lhs, rhs = padded_vals
+  logical_lhs_shape, rhs_shape = logical_shapes
+  assert rhs.shape == rhs_shape
+  n, c, *padded_dimensions = dimension_numbers.lhs_spec
+  assert onp.all((onp.array(lhs.shape) == logical_lhs_shape)[(n, c),])
+
+  return conv_general_dilated(
+    _masked(lhs, logical_lhs_shape, padded_dimensions), rhs,
+    window_strides=window_strides, padding=padding,
+    lhs_dilation=lhs_dilation, rhs_dilation=rhs_dilation,
+    dimension_numbers=dimension_numbers,
+    feature_group_count=feature_group_count,
+    precision=precision)
+
 conv_general_dilated_p = standard_primitive(
     _conv_general_dilated_shape_rule, _conv_general_dilated_dtype_rule,
     'conv_general_dilated', _conv_general_dilated_translation_rule)
@@ -2147,6 +2177,8 @@ ad.defbilinear(conv_general_dilated_p,
                _conv_general_dilated_transpose_rhs)
 batching.primitive_batchers[conv_general_dilated_p] = \
     _conv_general_dilated_batch_rule
+masking.masking_rules[conv_general_dilated_p] = \
+    _conv_general_dilated_masking_rule
 
 
 def _reshape_axis_into(src, dst, x):
@@ -2297,21 +2329,10 @@ def _dot_general_translation_rule(c, lhs, rhs, dimension_numbers, precision):
 def _dot_general_masking_rule(padded_vals, logical_shapes, dimension_numbers,
                               precision):
   lhs, rhs = padded_vals
-  lhs_shape, rhs_shape = logical_shapes
-  lhs_ndim, rhs_ndim = len(lhs_shape), len(rhs_shape)
-  (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
-
-  # we need only mask the lhs contraction dimensions
-  if len(lhs_contract) == 0:
-    return dot_general(lhs, rhs, dimension_numbers, precision=precision)
-  else:
-    masks = [broadcasted_iota(onp.int32, lhs.shape, d) < lhs_shape[d]
-            for d in lhs_contract]
-    mask_intersection = masks[0]
-    for mask in masks[1:]:
-      mask_intersection &= mask
-    masked_lhs = select(mask_intersection, lhs, zeros_like_array(lhs))
-    return dot_general(masked_lhs, rhs, dimension_numbers, precision=precision)
+  lhs_shape, _ = logical_shapes
+  (lhs_contract, _), _ = dimension_numbers
+  return dot_general(_masked(lhs, lhs_shape, lhs_contract),
+                     rhs, dimension_numbers, precision=precision)
 
 dot_general_p = standard_primitive(_dot_general_shape_rule,
                                    _dot_general_dtype_rule, 'dot_general',
@@ -2519,10 +2540,24 @@ def _pad_batch_rule(batched_args, batch_dims, padding_config):
   else:
     raise NotImplementedError  # loop and stack
 
+def _pad_masking_rule(padded_vals, logical_shapes, padding_config):
+  operand, padding_value = padded_vals
+  shape, _ = logical_shapes
+
+  result = pad(operand, padding_value, padding_config)
+  for i, (lo, hi, interior) in enumerate(padding_config):
+    hi_pad_slice = [_slice(None)] * len(shape)
+    hi_pad_slice[i] = _slice(lo + shape[i] * (interior + 1), None)
+    result = index_update(result, hi_pad_slice, padding_value)
+
+  return result
+
+
 pad_p = standard_primitive(_pad_shape_rule, _pad_dtype_rule, 'pad')
 ad.deflinear(pad_p, _pad_transpose)
 ad.primitive_transposes[pad_p] = _pad_transpose
 batching.primitive_batchers[pad_p] = _pad_batch_rule
+masking.masking_rules[pad_p] = _pad_masking_rule
 
 
 # We have a nonstandard reshape impl so that we can be lazy about data movement.
@@ -2608,12 +2643,26 @@ def _reshape_batch_rule(batched_args, batch_dims, new_sizes, dimensions, **unuse
     dimensions = (0,) + tuple(onp.add(1, dimensions))
   return reshape(operand, operand.shape[:1] + new_sizes, dimensions), 0
 
+def _reshape_masking_rule(padded_args, logical_shapes,
+                          new_sizes, dimensions, old_sizes):
+  padded_operand, = padded_args
+  new_padded_sizes = masking.padded_shape_as_value(new_sizes)
+  equal_dims = [new == old for new, old in zip(new_sizes, old_sizes)]
+  reshaped_dims = [i for i, dim in enumerate(old_sizes) if i >= len(new_sizes) or not equal_dims[i]]
+
+  if not onp.all((onp.array(padded_operand.shape) == masking.shape_as_value(old_sizes))[reshaped_dims,]):
+    raise ValueError("Reshaped dimensions have to be non-padded, so that logical and padded shapes match. "
+                     "This error is currently also raised when reshaped dimensions are not at the end, a case which is not yet implemented.")
+
+  return reshape(padded_operand,
+                 new_sizes=new_padded_sizes, dimensions=dimensions)
+
 reshape_p = standard_primitive(_reshape_shape_rule, _reshape_dtype_rule,
                                'reshape', _reshape_translation_rule)
 reshape_p.def_impl(_reshape_impl)
 ad.deflinear(reshape_p, _reshape_transpose_rule)
 batching.primitive_batchers[reshape_p] = _reshape_batch_rule
-
+masking.masking_rules[reshape_p] = _reshape_masking_rule
 
 def _rev_shape_rule(operand, dimensions):
   _check_shapelike('rev', 'dimensions', dimensions)
@@ -3120,12 +3169,21 @@ def _gather_batching_rule(batched_args, batch_dims, dimension_numbers,
     return gather(operand, start_indices, dimension_numbers=dnums,
                   slice_sizes=slice_sizes), 0
 
+def _gather_masking_rule(padded_vals, logical_shapes,
+                         dimension_numbers, slice_sizes, operand_shape):
+  operand, start_indices = padded_vals
+
+  return gather(operand, start_indices,
+                dimension_numbers=dimension_numbers,
+                slice_sizes=masking.padded_shape_as_value(slice_sizes))
+
 gather_p = standard_primitive(
     _gather_shape_rule, _gather_dtype_rule, 'gather',
     _gather_translation_rule)
 ad.defjvp(gather_p, _gather_jvp_rule, None)
 ad.primitive_transposes[gather_p] = _gather_transpose_rule
 batching.primitive_batchers[gather_p] = _gather_batching_rule
+masking.masking_rules[gather_p] = _gather_masking_rule
 
 
 class ScatterDimensionNumbers(collections.namedtuple(

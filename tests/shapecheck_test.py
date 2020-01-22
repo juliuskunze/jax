@@ -23,7 +23,7 @@ from jax import numpy as np, test_util as jtu, lax, api, random, vmap, jit, \
   shapecheck
 
 from jax.abstract_arrays import Poly, Mon
-from jax.api import _parse_shape_spec, ShapeError
+from jax.api import _parse_shape_spec, ShapeError, _remap_ids, _UniqueIds
 
 from jax.scipy.special import expit
 
@@ -50,14 +50,17 @@ class ShapesTest(jtu.JaxTestCase):
       ['(3 * m)', 'ShapeSpec(3 m)'],
       ['m', 'ShapeSpec(m)'],
       ['', 'ShapeSpec()'],
+      ['n + -1*n', 'ShapeSpec(0)'],
       ['m + n', 'ShapeSpec(m + n)'],
-      ['m + n * k', 'ShapeSpec(m + k n)'],
+      ['m + n * k', 'ShapeSpec(k n + m)'],
       ['m + 3 * k', 'ShapeSpec(3 k + m)'],
+      ['-3 + k + k * k', 'ShapeSpec(k**2 + k + -3)'],
       ['', 'ShapeSpec()'],
       ['_', 'ShapeSpec(_)'],
   ])
   def test_parse_spec(self, spec, ans):
     self.assertEqual(str(_parse_shape_spec(spec)), ans)
+    self.assertEqual(str(_remap_ids(_UniqueIds(), _parse_shape_spec(spec))), ans)
 
   def test_Poly_equal(self):
     assert const_poly(3) == 3
@@ -76,6 +79,10 @@ class ShapesTest(jtu.JaxTestCase):
   def test_Poly_hash(self):
     assert not len(set(hash(Poly({Mon(): i})) for i in range(10))) == 1
     assert hash(Poly({Mon(): 3, Mon({'n': 1}): 4})) == hash(Poly({Mon({'n': 1}): 4, Mon(): 3}))
+
+  def test_Mon_hash(self):
+    assert not len(set(hash(Mon({'a': i})) for i in range(10))) == 1
+    assert hash(Mon({'a': 1, 'b': 1})) == hash(Mon({'b': 1, 'a': 1}))
 
   def test_Poly_compare(self):
     poly = Poly({Mon(): 3, Mon({'n': 1}): 4})
@@ -134,11 +141,6 @@ class ShapesTest(jtu.JaxTestCase):
         return lax.dot_general(A, b, [((0,), (0,)), ((), ())])
     self.assertRaisesRegex(TypeError, "", thunk)
 
-  def test_flatten(self):
-    @shapecheck(['(m, n)'], 'm * n')
-    def flatten(x):
-      return lax.reshape(x, (x.shape[0] * x.shape[1],))
-
   def test_concatenate(self):
     @shapecheck(['m', 'n', 'm'], '3*m + n')
     def cat(x, y, z):
@@ -150,11 +152,6 @@ class ShapesTest(jtu.JaxTestCase):
         return lax.concatenate([x, y, x], 0)
     self.assertRaisesRegex(ShapeError, "", thunk)
 
-  def test_device_put(self):
-    @shapecheck(['n'], 'n')
-    def d_put(x):
-      return api.device_put(x)
-
   def test_broadcast_in_dim(self):
     x = np.zeros((7, 1))
     lax.broadcast_in_dim(x, shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2))
@@ -162,88 +159,17 @@ class ShapesTest(jtu.JaxTestCase):
     def broadcast_in_dim(x):
       return lax.broadcast_in_dim(x, shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2))
 
-  def test_jit(self):
-    @shapecheck(['n'], '2*n')
-    @jit
-    def concat(x):
-      return lax.concatenate([x, x], 0)
-
-    # TODO:
-    # @shapecheck(['n'], 'n')
-    # @jit
-    # @grad
-    # def sum_square(x):
-    #   return np.sum(x ** 2)
-
   def test_pad(self):
     @shapecheck(['n'], '2*n+1')
     def p(x):
       return lax.pad(x, np.array(0., x.dtype), [(1, 1, 1)])
 
-  def test_numpy_pad(self):
-    @shapecheck(['n'], 'n+1')
-    def p(x):
-      return np.pad(x, (0, 1))
-
-  @parameterized.named_parameters(jtu.cases_from_list(
-    {
-      'testcase_name': "strides={}_padding={}_lhs_dilation={}_dimension_numbers"
-                       "={}_lhs_perm={}_rhs_perm={}_out_perm={}".format(
-        strides, padding, lhs_dilation, dimension_numbers, lhs_perm, rhs_perm, out_perm),
-      'strides': strides, 'padding': padding, 'lhs_dilation': lhs_dilation,
-      'dimension_numbers': dimension_numbers, 'lhs_perm': lhs_perm,
-      'rhs_perm': rhs_perm, 'out_perm': out_perm}
-    for strides in [(1, 1), (2, 1)]
-    for padding in ['SAME', 'VALID', ((1, 0), (2, 0))]
-    for lhs_dilation in (None, (1, 2))
-    for dimension_numbers, (lhs_perm, rhs_perm, out_perm) in (
-            (("NCHW", "OIHW", "NCHW"), ((0, 1, 2, 3), (0, 1, 2, 3), (0, 1, 2, 3))),
-            (("NHWC", "HWIO", "NHWC"), ((0, 2, 3, 1), (2, 3, 1, 0), (0, 2, 3, 1))),
-            (("NCHW", "HWIO", "NHWC"), ((0, 1, 2, 3), (2, 3, 1, 0), (0, 2, 3, 1)))
-    )
-    # String padding is not implemented for transposed convolution, see conv_general_dilated implementation:
-    if (lhs_dilation is None or not isinstance(padding, str)) and
-    # only test strides with same padding:
-    (strides[0] == 1 or padding == 'SAME')))
-  def test_conv(self, strides, padding, lhs_dilation,
-                           dimension_numbers, lhs_perm, rhs_perm, out_perm):
-    valid = padding == 'VALID'
-    is_strided = strides[0] != 1
-    lhs_shape = '({}, {}, {}, {})'.format(*onp.take(['n', 'i', '2*h' if is_strided else 'h', 'w'], lhs_perm))
-    rhs_shape = '({}, {}, {}, {})'.format(*onp.take(['o', 'i', '2', '3'], rhs_perm))
-    out_shape = '({}, {}, {}, {})'.format(*onp.take([
-      'n', 'o', 'h+-1' if valid and not is_strided else 'h',
-      ('w+-2' if valid else 'w') if lhs_dilation is None else '2*w+-1'], out_perm))
-
-    @shapecheck([lhs_shape, rhs_shape], out_shape)
-    def conv(lhs, rhs):
-      return lax.conv_general_dilated(
-        lhs, rhs, strides, padding,
-        lhs_dilation=lhs_dilation, dimension_numbers=dimension_numbers)
-
-  def test_indexing(self):
-    @shapecheck(['n'], '')
-    def first(x):
-      return x[0]
-
-    @shapecheck(['n'], '')
-    def last(x):
-      return x[-1]
-
+  def test_vmap_shapecheck(self):
     @shapecheck(['(n,m,a)'], 'n,m')
     @vmap
     @shapecheck(['(n,a)'], 'n')
     def last_column(x):
       return x[..., -1]
-
-  def test_slicing(self):
-    @shapecheck(['n'], 'n+-1')
-    def slice(x):
-      return x[1:]
-
-    @shapecheck(['n'], 'n+-1')
-    def slice(x):
-      return x[:-1]
 
   def test_iota(self):
     @shapecheck(['n'], 'n')
@@ -254,23 +180,6 @@ class ShapesTest(jtu.JaxTestCase):
     @shapecheck(['n'], 'n')
     def arange_like(x):
       return np.arange(x.shape[0], dtype=np.int32)
-
-  def test_expit(self):
-    @shapecheck(['n'], 'n')
-    def expit_(x):
-      return expit(x)
-
-  def test_reshape(self):
-    @shapecheck(['n, a, b'], 'n, a*b')
-    def flatten(x):
-      return np.reshape(x, (x.shape[0], x.shape[1] * x.shape[2]))
-
-  def test_ravel(self):
-    a = np.array(1)
-
-    @shapecheck(['n'], '')
-    def thunk(n):
-      return -(a + n.ravel()[0] * 0)
 
   def test_split(self):
     @shapecheck(['2*n'], ['n', 'n'])

@@ -262,8 +262,10 @@ def is_polymorphic(shape):
   return any(map(lambda d: type(d) is Poly, shape))
 
 def eval_polymorphic_shape(shape, values_dict):
-  return tuple(dim.evaluate(values_dict) if type(dim) is Poly else dim
-               for dim in shape)
+  return tuple(eval_polymorphic_dim(dim, values_dict) for dim in shape)
+
+def eval_polymorphic_dim(dim, values_dict):
+  return dim.evaluate(values_dict) if type(dim) is Poly else dim
 
 def _ensure_poly(p):
   if type(p) is Poly:
@@ -382,6 +384,9 @@ class Poly(dict):
                       if (v != 1 or k.degree == 0) else str(k)
                       for k, v in sorted(self.items())).strip()
 
+  def __repr__(self):
+    return str(self)
+
   def __int__(self):
     assert self.is_constant
 
@@ -397,7 +402,7 @@ class Poly(dict):
 
 class Mon(dict):  # type Mon = Map Id Int -- ids to degrees
   def __hash__(self):
-    return hash(tuple(self.items()))
+    return hash(tuple(sorted(self.items())))
 
   def __str__(self):
     return ' '.join('{}**{}'.format(k, v) if v != 1 else str(k)
@@ -405,8 +410,8 @@ class Mon(dict):  # type Mon = Map Id Int -- ids to degrees
 
   def __lt__(self, other):
     # sort by total degree, then lexicographically on indets
-    self_key = self.degree, tuple(sorted(self))
-    other_key = other.degree, tuple(sorted(other))
+    self_key = -self.degree, tuple(sorted(self))
+    other_key = -other.degree, tuple(sorted(other))
     return self_key < other_key
 
   def __mul__(self, other):

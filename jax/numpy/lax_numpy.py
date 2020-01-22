@@ -49,6 +49,7 @@ from ..abstract_arrays import (UnshapedArray, ShapedArray, ConcreteArray,
                                is_polymorphic, to_index, Poly)
 from ..config import flags
 from ..interpreters.xla import DeviceArray
+from ..interpreters import masking
 from .. import lax
 from ..util import partial, get_module_functions, unzip2, prod as _prod, subvals
 from ..lib import pytree
@@ -2968,7 +2969,7 @@ def _index_to_gather(x_shape, idx):
         isinstance(abstract_i, ShapedArray)) and _int(abstract_i):
       i = _normalize_index(i, x_shape[x_axis])
       # dummy index if is polynomial, doesn't matter for shape inference:
-      i = 0 if type(i) is Poly else lax.convert_element_type(i, int32)
+      i = masking.try_get_shape_dim_as_value(i, 0) if type(i) is Poly else lax.convert_element_type(i, int32)
       i = broadcast_to(i, tuple(gather_indices.shape[:-1]) + (1,))
       gather_indices = concatenate((gather_indices, i), -1)
       collapsed_slice_dims.append(x_axis)
