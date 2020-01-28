@@ -385,6 +385,12 @@ class MaskingTest(jtu.JaxTestCase):
     self.check(lambda x: x[1:], ['n'], dict(n=3), 'n+-1')
     self.check(lambda x: x[:-1], ['n'], dict(n=3), 'n+-1')
 
+  def test_lax_slice(self):
+    raise SkipTest
+
+    self.check(lambda x: lax.slice(x, (1,), (x.shape[0],)), ['n'], dict(n=3), 'n+-1')
+    self.check(lambda x: lax.slice(x, (x.shape[0] // 2,), (x.shape[0],)), ['2*n'], dict(n=3), 'n')
+
   def test_reshape(self):
     self.check(lambda x: np.reshape(x, (x.shape[0], x.shape[1] * x.shape[2])),
                ['n, a, b'], dict(n=1, a=2, b=3), 'n, a*b',
@@ -450,7 +456,7 @@ class MaskingTest(jtu.JaxTestCase):
 
     @partial(mask, in_shapes=['n'], out_shape='n')
     def padded_add(x):
-      return x + lax.iota(x.shape[0])
+      return x + np.arange(x.shape[0])
 
     ans = padded_add([np.array([3, 1, 4, 1, 5])], dict(n=3))
     expected = onp.array([3, 2, 6])
@@ -465,7 +471,16 @@ class MaskingTest(jtu.JaxTestCase):
   def test_uniform(self):
     raise SkipTest
 
-    self.check(lambda key, x: random.uniform(key, x.shape), ['2', 'n'], dict(n=3), 'n', custom_inputs={0: PRNGKey(0)})
+    self.check(lambda x: random.uniform(PRNGKey(0), x.shape), ['2*n'], dict(n=3), '2*n', custom_inputs={0: PRNGKey(0)})
+
+  def test_broadcast_in_dim(self):
+    raise SkipTest
+
+    @partial(mask, in_shapes=['(n, 1)'], out_shape='(3, n, 4)')
+    def broadcast_in_dim(x):
+      return -lax.broadcast_in_dim(x, shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2))
+
+    broadcast_in_dim([np.zeros((2, 1))], dict(n=1))
 
 if __name__ == '__main__':
   absltest.main()

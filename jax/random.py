@@ -46,7 +46,7 @@ from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
 from jax.util import prod
-from jax.abstract_arrays import is_polymorphic, to_index
+from jax.abstract_arrays import Poly, to_index
 
 
 def PRNGKey(seed):
@@ -271,23 +271,16 @@ def _fold_in(key, data):
 
 def _random_bits(key, bit_width, shape):
   """Sample uniform random bits of given width and shape using PRNG key."""
-
-  # TODO remove this special case:
-  if is_polymorphic(shape):
-    # returns a correctly shaped dummy:
-    return np.broadcast_to(0 * key[0], shape).astype(
-      onp.uint64 if bit_width == 64 else onp.uint32)
-
   if not _is_prng_key(key):
     raise TypeError("_random_bits got invalid prng key.")
   if bit_width not in (32, 64):
     raise TypeError("requires 32- or 64-bit field width.")
   max_count = (bit_width // 32) * onp.prod(shape)
-  if max_count >= np.iinfo(onp.uint32).max:
+  if type(max_count) is not Poly and max_count >= np.iinfo(onp.uint32).max:
     # TODO(mattjj): just split the key here
     raise TypeError("requesting more random bits than a single call provides.")
 
-  counts = lax.tie_in(key, lax.iota(onp.uint32, max_count.astype(onp.uint32)))
+  counts = lax.tie_in(key, lax.iota(onp.uint32, max_count if type(max_count) is Poly else max_count.astype(onp.uint32)))
   bits = threefry_2x32(key, counts)
   if bit_width == 64:
     bits = [lax.convert_element_type(x, onp.uint64) for x in np.split(bits, 2)]

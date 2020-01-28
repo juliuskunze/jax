@@ -27,6 +27,9 @@ from typing import Any
 import warnings
 
 import numpy as onp
+from jax.interpreters.partial_eval import new_eqn_recipe, JaxprTracer, \
+  PartialVal
+from jax.interpreters.xla import DeviceArray
 
 from ..util import partial, prod
 
@@ -38,15 +41,17 @@ from .. import dtypes
 from .. import lazy
 from ..ops import index_update
 from ..config import flags
-from ..core import Primitive
+from ..core import Primitive, unit, Tracer
 from ..abstract_arrays import (UnshapedArray, ShapedArray, ConcreteArray,
                                AbstractToken, array_types, make_shaped_array,
-                               raise_to_shaped, abstract_token, to_index)
+                               raise_to_shaped, abstract_token, to_index,
+                               is_polymorphic, Poly)
 from ..interpreters import partial_eval as pe
 from ..interpreters import xla
 from ..interpreters import pxla
 from ..interpreters import ad
 from ..interpreters import batching
+from ..interpreters import polymorphic
 from ..interpreters import masking
 from ..util import curry, cache, safe_zip, unzip2, prod
 from ..tree_util import build_tree, tree_unflatten, tree_map
@@ -641,6 +646,10 @@ def broadcast(operand, sizes):
 def broadcast_in_dim(operand, shape, broadcast_dimensions):
   if onp.ndim(operand) == len(shape) and not len(broadcast_dimensions):
     return operand
+
+  if is_polymorphic(shape):
+    operand = polymorphic.ensure_traced(operand)
+
   return broadcast_in_dim_p.bind(
       operand, shape=tuple(shape),
       broadcast_dimensions=tuple(broadcast_dimensions))
@@ -1082,16 +1091,46 @@ def full(shape, fill_value, dtype=None):
   fill_value = xla.device_put_p.bind(convert_element_type(fill_value, dtype))
   return broadcast(fill_value, shape)
 
+@curry
+def _jaxpr_process_primitive_without_lowering(prim, trace, *tracers, **params):
+  # Like JaxprTrace.process_primitive
+  # except that we don't attempt to lower out of the trace.
+  avals = [t.aval for t in tracers]
+  out_aval = prim.abstract_eval(*avals, **params)
+  out_tracer = JaxprTracer(trace, PartialVal((out_aval, unit)), None)
+  out_tracer.recipe = new_eqn_recipe(tracers, [out_tracer], prim, (), params)
+  return out_tracer
+
+def _iota_impl(dummy, dtype, size):
+  # Dummy to allow abstract_eval to be called for polymorphic sizes, see iota.
+  aval = ShapedArray((size,), dtype)
+  lazy_expr = lazy.iota(dtype, size)
+  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+
+def _iota_abstract_eval(dummy, dtype, size):
+  if type(size) is Poly:
+    return ShapedArray((size,), dtype)
+
+  return ConcreteArray(_iota_impl(dummy, dtype=dtype, size=size))
+
+iota_p = Primitive('iota')
+iota_p.def_impl(_iota_impl)
+iota_p.def_abstract_eval(_iota_abstract_eval)
+pe.custom_partial_eval_rules[iota_p] = _jaxpr_process_primitive_without_lowering(iota_p)
+
 def iota(dtype, size):
   """Wraps XLA's `Iota
   <https://www.tensorflow.org/xla/operation_semantics#iota>`_
   operator.
   """
-  size = to_index(size)
-  dtype = dtypes.canonicalize_dtype(dtype)
-  lazy_expr = lazy.iota(dtype, size)
-  aval = ShapedArray((size,), dtype)
-  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+
+  dummy = onp.array(0)
+  if type(size) is Poly:
+    dummy = polymorphic.ensure_traced(dummy)
+
+  return iota_p.bind(dummy,
+                     dtype=dtypes.canonicalize_dtype(dtype),
+                     size=to_index(size))
 
 def broadcasted_iota(dtype, shape, dimension):
   """Convenience wrapper around ``iota``."""
@@ -1500,7 +1539,7 @@ def _iter(tracer):
   if tracer.ndim == 0:
     raise TypeError("iteration over a 0-d array")  # same as numpy error
   else:
-    n = tracer.shape[0]
+    n = int(tracer.shape[0])
     # return (index_in_dim(tracer, i, keepdims=False) for i in range(n))
     return iter([index_in_dim(tracer, i, keepdims=False) for i in range(n)])
 ShapedArray._iter = staticmethod(_iter)
@@ -2398,13 +2437,21 @@ def _broadcast_in_dim_batch_rule(batched_args, batch_dims, shape,
   new_broadcast_dimensions = (0,) + tuple(onp.add(1, broadcast_dimensions))
   return broadcast_in_dim(new_operand, new_shape, new_broadcast_dimensions), 0
 
+def _broadcast_abstract_eval(operand, shape, broadcast_dimensions):
+  if is_polymorphic(shape) and type(operand) is ConcreteArray:
+    operand = ShapedArray(operand.shape, operand.dtype)
+
+  return standard_abstract_eval(
+    broadcast_in_dim_p, _broadcast_in_dim_shape_rule, _input_dtype,
+    operand, shape=shape, broadcast_dimensions=broadcast_dimensions)
 
 broadcast_in_dim_p = standard_primitive(
     _broadcast_in_dim_shape_rule, _input_dtype, 'broadcast_in_dim')
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
 ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
-
+broadcast_in_dim_p.def_abstract_eval(_broadcast_abstract_eval)
+pe.custom_partial_eval_rules[broadcast_in_dim_p] = _jaxpr_process_primitive_without_lowering(broadcast_in_dim_p)
 
 def _clamp_shape_rule(min, operand, max):
   if min.shape and min.shape != operand.shape:
@@ -2805,7 +2852,7 @@ def _slice_shape_rule(operand, start_indices, limit_indices, strides,
     msg = ("slice limit_indices must have the same length as start_indices, "
            "got start_inidices {} and limit_indices {}.")
     raise TypeError(msg.format(start_indices, limit_indices))
-  if not onp.all(onp.less_equal(limit_indices, operand.shape)):
+  if not is_polymorphic(operand.shape) and not onp.all(onp.less_equal(limit_indices, operand.shape)):
     msg = ("slice limit_indices must be less than or equal to operand shape, "
            "got limit_indices {} for operand shape {}.")
     raise TypeError(msg.format(limit_indices, operand.shape))
@@ -2813,7 +2860,7 @@ def _slice_shape_rule(operand, start_indices, limit_indices, strides,
     msg = ("slice start_indices must be greater than or equal to zero, "
            "got start_indices of {}.")
     raise TypeError(msg.format(start_indices))
-  if not onp.all(onp.greater_equal(limit_indices, start_indices)):
+  if not is_polymorphic(start_indices) and not is_polymorphic(limit_indices) and not onp.all(onp.greater_equal(limit_indices, start_indices)):
     msg = ("slice limit_indices must be greater than or equal to start_indices,"
            " got start_indices {} and limit_indices {}.")
     raise TypeError(msg.format(start_indices, limit_indices))

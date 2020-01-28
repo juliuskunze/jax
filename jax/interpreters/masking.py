@@ -10,6 +10,7 @@ from ..util import safe_map, safe_zip, unzip2
 from ..abstract_arrays import ShapedArray, Poly, eval_polymorphic_shape, \
   eval_polymorphic_dim
 from .. import linear_util as lu
+from . import polymorphic
 
 map = safe_map
 zip = safe_zip
@@ -34,6 +35,9 @@ def naryop_masking_rule(prim, padded_vals, logical_shapes):
 
 ShapeEnvs = namedtuple("ShapeEnvs", ["logical", "padded"])
 shape_envs = ShapeEnvs({}, {})  # TODO(mattjj): make this a stack for efficiency
+
+def is_tracing():
+  return shape_envs.padded
 
 @contextmanager
 def extend_shape_envs(logical_env, padded_env):
@@ -134,3 +138,5 @@ class MaskTrace(Trace):
     f, out_shapes_thunk = mask_subtrace(f, self.master, polymorphic_shapes)
     out_vals = call_primitive.bind(f, *vals, **params)
     return map(partial(MaskTracer, self), out_vals, out_shapes_thunk())
+
+polymorphic.polymorphic_trace_types.append(MaskTrace)

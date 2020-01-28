@@ -1065,11 +1065,6 @@ def _where(condition, x=None, y=None):
     condition = lax.ne(condition, zeros_like(condition))
   x, y = _promote_dtypes(x, y)
 
-  # TODO remove this special case:
-  result_shape = lax.broadcast_shapes(condition.shape, x.shape, y.shape)
-  if is_polymorphic(result_shape):
-    return lax.convert_element_type(broadcast_to(condition, result_shape), x.dtype)
-
   condition, x, y = broadcast_arrays(condition, x, y)
   return lax.select(condition, x, y) if onp.size(x) else x
 
@@ -1135,31 +1130,20 @@ def broadcast_to(arr, shape):
 
 @_wraps(onp.split)
 def split(ary, indices_or_sections, axis=0):
-  # TODO remove this special case:
-  if is_polymorphic(ary.shape):
-    # returns a correctly shaped dummy:
-    if type(indices_or_sections) in (list, tuple):
-      assert len(indices_or_sections) == 1 # TODO generalize
-      index = to_index(indices_or_sections[0])
-      assert index > 0 # TODO generalize
-      slices = [[slice(None)] * ary.ndim for _ in range(2)]
-      slices[0][axis] = slice(None, index)
-      slices[1][axis] = slice(index, None)
+  size = ary.shape[axis]
 
-      return [ary[slices[0]], ary[slices[1]]]
+  # TODO generalize:
+  if type(indices_or_sections) in {int, Poly}:
+    part_size, r = _divmod(size, indices_or_sections)
 
-    count = to_index(indices_or_sections)
+    if r != 0:
+      # TODO add message:
+      raise ValueError
 
-    s = [slice(None)] * ary.ndim
-    split_size, r = _divmod(ary.shape[axis], count)
-    s[axis] = slice(None, split_size)
-    assert r == 0
+    split_indices = onp.arange(indices_or_sections + 1) * part_size
+  else:
+    split_indices = onp.concatenate([[0], indices_or_sections, [size]])
 
-    return [ary[s]] * count
-
-  dummy_val = onp.broadcast_to(0, ary.shape)  # zero strides
-  subarrays = onp.split(dummy_val, indices_or_sections, axis)  # shapes
-  split_indices = onp.cumsum([0] + [onp.shape(sub)[axis] for sub in subarrays])
   starts, ends = [0] * ndim(ary), shape(ary)
   _subval = lambda x, i, v: subvals(x, [(i, v)])
   return [lax.slice(ary, _subval(starts, axis, start), _subval(ends, axis, end))
@@ -1913,7 +1897,7 @@ def identity(n, dtype=None):
 def arange(start, stop=None, step=None, dtype=None):
   lax._check_user_dtype_supported(dtype, "arange")
   if stop is None and step is None:
-    dtype = dtype or _dtype(start)
+    dtype = dtype or (onp.uint64 if type(start) is Poly else _dtype(start))
     size = start if type(start) is Poly else lax.convert_element_type(start, onp.uint64)
     return lax.iota(dtype, size) # avoids materializing
   else:
