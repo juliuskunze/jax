@@ -34,7 +34,7 @@ config.parse_flags_with_absl()
 def const_poly(c):
   return Poly({Mon(): c})
 
-class ShapesTest(jtu.JaxTestCase):
+class PolymorphicTest(jtu.JaxTestCase):
 
   @parameterized.parameters([
       ['(m, n)', 'ShapeSpec(m, n)'],
@@ -100,126 +100,6 @@ class ShapesTest(jtu.JaxTestCase):
     assert (n, 1) == divmod(2*n+1, 2)
     assert (2*n, 0) == divmod(10*n, 5)
     assert (2*n+4, 3) == divmod(10*n+23, 5)
-
-  def test_destructure(self):
-    @shapecheck(['2'], '')
-    def _(key):
-      key1, key2 = key
-      return key1
-
-  def test_add_broadcast(self):
-     @shapecheck(['(m, n)', 'n'], '(m, n)')
-     @shapecheck(['n', ''], 'n')
-     def add(a, b):
-       return a + b
-
-  def test_sum(self):
-    @shapecheck(['(m, n)'], '')
-    def sum(x):
-      return np.sum(x)
-
-  def test_prod(self):
-    @shapecheck(['(m, n)'], '')
-    def prod(x):
-      return np.prod(x)
-
-  def test_max(self):
-    @shapecheck(['(m, n)'], '')
-    def prod(x):
-      return np.max(x)
-
-  def test_min(self):
-    @shapecheck(['(m, n)'], '')
-    def prod(x):
-      return np.min(x)
-
-  def test_dot(self):
-    @shapecheck(['(m, n)', 'n'], 'm')
-    def matvec(A, b):
-      return np.dot(A, b)
-
-    def thunk():
-      @shapecheck(['(m, n)', 'n'], 'm')
-      def matvec(A, b):
-        return lax.dot_general(A, b, [((0,), (0,)), ((), ())])
-    self.assertRaisesRegex(TypeError, "", thunk)
-
-  def test_concatenate(self):
-    @shapecheck(['m', 'n', 'm'], '3*m + n')
-    def cat(x, y, z):
-      return lax.concatenate([x, y, x, z], 0)
-
-    def thunk():
-      @shapecheck(['m', 'n', 'm'], '3*m + n')
-      def cat(x, y, z):
-        return lax.concatenate([x, y, x], 0)
-    self.assertRaisesRegex(ShapeError, "", thunk)
-
-  def test_broadcast_in_dim(self):
-    @shapecheck(['(n, 1)'], '(3, n, 4)')
-    def broadcast_in_dim(x):
-      return -lax.broadcast_in_dim(np.zeros((1, 1)), shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2))
-
-  def test_pad(self):
-    @shapecheck(['n'], '2*n+1')
-    def p(x):
-      return lax.pad(x, np.array(0., x.dtype), [(1, 1, 1)])
-
-  def test_vmap_shapecheck(self):
-    @shapecheck(['(n,m,a)'], 'n,m')
-    @vmap
-    @shapecheck(['(n,a)'], 'n')
-    def last_column(x):
-      return x[..., -1]
-
-  def test_iota(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -lax.iota(np.int32, x.shape[0])
-
-  def test_arange(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -np.arange(x.shape[0])
-
-  def test_split(self):
-    @shapecheck(['2*n'], ['n', 'n'])
-    def split_half(x):
-      return np.split(x, 2)
-
-    @shapecheck(['n'], ['10', 'n+-10'])
-    def split_after_ten(x):
-      return np.split(x, [10])
-
-  def test_uniform(self):
-    # TODO: allow input shape `n`
-    #  random.threefry_2x32 currently handles even and odd sizes differently,
-    #  making general size `n` fail.
-
-    @shapecheck(['2*n+1'], '2*n+1')
-    @shapecheck(['2*n'], '2*n')
-    def _(x):
-      return -random.uniform(PRNGKey(0), x.shape)
-
-  def test_where(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -np.where(x < 0, x, 0.)
-
-  def test_zeros(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -np.zeros(x.shape)
-
-  def test_ones(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -np.ones(x.shape)
-
-  def test_broadcast_to(self):
-    @shapecheck(['n'], 'n')
-    def _(x):
-      return -np.broadcast_to(0, x.shape)
 
 if __name__ == '__main__':
   absltest.main()

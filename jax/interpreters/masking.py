@@ -45,8 +45,10 @@ def extend_shape_envs(logical_env, padded_env):
   new_logical = dict(chain(shape_envs.logical.items(), logical_env.items()))
   new_padded = dict(chain(shape_envs.padded.items(), padded_env.items()))
   shape_envs, prev = ShapeEnvs(new_logical, new_padded), shape_envs
-  yield
-  shape_envs = prev
+  try:
+    yield
+  finally:
+    shape_envs = prev
 
 def shape_as_value(shape):
   return eval_polymorphic_shape(shape, shape_envs.logical)
@@ -87,6 +89,8 @@ class MaskTracer(Tracer):
   def __init__(self, trace, val, polymorphic_shape):
     self.trace = trace
     self.val = val
+    # TODO this breaks tests but is used in aval:
+    # assert self.val.dtype
     self.polymorphic_shape = polymorphic_shape
 
   @property
@@ -136,7 +140,17 @@ class MaskTrace(Trace):
   def process_call(self, call_primitive, f, tracers, params):
     vals, polymorphic_shapes = unzip2((t.val, t.polymorphic_shape) for t in tracers)
     f, out_shapes_thunk = mask_subtrace(f, self.master, polymorphic_shapes)
-    out_vals = call_primitive.bind(f, *vals, **params)
+    # TODO use call_primitive.bind(f, *vals, **params) instead here.
+    #  currently breaks MaskingTest.test_where
+    out_vals = f.call_wrapped(*vals)
     return map(partial(MaskTracer, self), out_vals, out_shapes_thunk())
+
+  def post_process_call(self, call_primitive, out_tracers, params):
+    vals, polymorphic_shapes = unzip2((t.val, t.polymorphic_shape) for t in out_tracers)
+    master = self.master
+    def todo(x):
+      trace = MaskTrace(master, core.cur_sublevel())
+      return map(partial(MaskTracer, trace), x, polymorphic_shapes)
+    return vals, todo
 
 polymorphic.polymorphic_trace_types.append(MaskTrace)

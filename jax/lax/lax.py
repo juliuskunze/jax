@@ -1113,10 +1113,14 @@ def _iota_abstract_eval(dummy, dtype, size):
 
   return ConcreteArray(_iota_impl(dummy, dtype=dtype, size=size))
 
+def _iota_masking_rule(padded_vals, logical_shapes, dtype, size):
+  return _iota_impl(None, dtype, masking.padded_shape_dim_as_value(size))
+
 iota_p = Primitive('iota')
 iota_p.def_impl(_iota_impl)
 iota_p.def_abstract_eval(_iota_abstract_eval)
 pe.custom_partial_eval_rules[iota_p] = _jaxpr_process_primitive_without_lowering(iota_p)
+masking.masking_rules[iota_p] = _iota_masking_rule
 
 def iota(dtype, size):
   """Wraps XLA's `Iota
@@ -2445,6 +2449,12 @@ def _broadcast_abstract_eval(operand, shape, broadcast_dimensions):
     broadcast_in_dim_p, _broadcast_in_dim_shape_rule, _input_dtype,
     operand, shape=shape, broadcast_dimensions=broadcast_dimensions)
 
+def _broadcast_in_dim_masking_rule(padded_vals, logical_shapes, shape, broadcast_dimensions):
+  operand, = padded_vals
+  return broadcast_in_dim(operand,
+                          shape=masking.padded_shape_as_value(shape),
+                          broadcast_dimensions=broadcast_dimensions)
+
 broadcast_in_dim_p = standard_primitive(
     _broadcast_in_dim_shape_rule, _input_dtype, 'broadcast_in_dim')
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
@@ -2452,6 +2462,7 @@ ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
 broadcast_in_dim_p.def_abstract_eval(_broadcast_abstract_eval)
 pe.custom_partial_eval_rules[broadcast_in_dim_p] = _jaxpr_process_primitive_without_lowering(broadcast_in_dim_p)
+masking.masking_rules[broadcast_in_dim_p] = _broadcast_in_dim_masking_rule
 
 def _clamp_shape_rule(min, operand, max):
   if min.shape and min.shape != operand.shape:
@@ -2692,17 +2703,9 @@ def _reshape_batch_rule(batched_args, batch_dims, new_sizes, dimensions, **unuse
 
 def _reshape_masking_rule(padded_args, logical_shapes,
                           new_sizes, dimensions, old_sizes):
-  padded_operand, = padded_args
-  new_padded_sizes = masking.padded_shape_as_value(new_sizes)
-  equal_dims = [new == old for new, old in zip(new_sizes, old_sizes)]
-  reshaped_dims = [i for i, dim in enumerate(old_sizes) if i >= len(new_sizes) or not equal_dims[i]]
-
-  if not onp.all((onp.array(padded_operand.shape) == masking.shape_as_value(old_sizes))[reshaped_dims,]):
-    raise ValueError("Reshaped dimensions have to be non-padded, so that logical and padded shapes match. "
-                     "This error is currently also raised when reshaped dimensions are not at the end, a case which is not yet implemented.")
-
-  return reshape(padded_operand,
-                 new_sizes=new_padded_sizes, dimensions=dimensions)
+  return reshape(*padded_args,
+                 new_sizes=masking.padded_shape_as_value(new_sizes),
+                 dimensions=dimensions)
 
 reshape_p = standard_primitive(_reshape_shape_rule, _reshape_dtype_rule,
                                'reshape', _reshape_translation_rule)
@@ -2757,12 +2760,16 @@ def _transpose_batch_rule(batched_args, batch_dims, permutation):
   perm = (bdim,) + tuple(i if i < bdim else i+1 for i in permutation)
   return transpose(operand, perm), 0
 
+def _transpose_masking_rule(padded_vals, logical_shapes, permutation):
+  return transpose(*padded_vals, permutation=permutation)
+
 transpose_p = standard_primitive(_transpose_shape_rule, _input_dtype,
                                  'transpose')
 transpose_p.def_impl(_transpose_impl)
 ad.deflinear(transpose_p,
              lambda t, permutation: [transpose(t, onp.argsort(permutation))])
 batching.primitive_batchers[transpose_p] = _transpose_batch_rule
+masking.masking_rules[transpose_p] = _transpose_masking_rule
 
 
 def _select_shape_rule(pred, on_true, on_false):
@@ -2831,6 +2838,9 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
     on_false = broadcast(on_false, pred.shape)
   return select(pred, on_true, on_false), 0
 
+def _select_masking_rule(padded_vals, logical_shapes):
+  return select(*padded_vals)
+
 select_p = standard_primitive(_select_shape_rule, _select_dtype_rule, 'select')
 ad.defjvp(select_p,
           None,
@@ -2838,6 +2848,7 @@ ad.defjvp(select_p,
           lambda g, b, x, y: select(b, _zeros(g), g))
 ad.primitive_transposes[select_p] = _select_transpose_rule
 batching.primitive_batchers[select_p] = _select_batch_rule
+masking.masking_rules[select_p] = _select_masking_rule
 
 
 def _slice_shape_rule(operand, start_indices, limit_indices, strides,
@@ -2852,7 +2863,7 @@ def _slice_shape_rule(operand, start_indices, limit_indices, strides,
     msg = ("slice limit_indices must have the same length as start_indices, "
            "got start_inidices {} and limit_indices {}.")
     raise TypeError(msg.format(start_indices, limit_indices))
-  if not is_polymorphic(operand.shape) and not onp.all(onp.less_equal(limit_indices, operand.shape)):
+  if not is_polymorphic(limit_indices) and not is_polymorphic(operand.shape) and not onp.all(onp.less_equal(limit_indices, operand.shape)):
     msg = ("slice limit_indices must be less than or equal to operand shape, "
            "got limit_indices {} for operand shape {}.")
     raise TypeError(msg.format(limit_indices, operand.shape))
@@ -2918,10 +2929,19 @@ def _slice_batching_rule(batched_args, batch_dims, start_indices, limit_indices,
   out = slice(operand, new_start_indices, new_limit_indices, new_strides)
   return out, bdim
 
+def _slice_masking_rule(padded_vals, logical_shapes, start_indices, limit_indices,
+                       strides, operand_shape):
+  operand, = padded_vals
+  return slice(operand,
+               start_indices=masking.padded_shape_as_value(start_indices),
+               limit_indices=masking.padded_shape_as_value(limit_indices),
+               strides=strides)
+
 slice_p = standard_primitive(_slice_shape_rule, _input_dtype, 'slice',
                              _slice_translation_rule)
 ad.deflinear(slice_p, _slice_transpose_rule)
 batching.primitive_batchers[slice_p] = _slice_batching_rule
+masking.masking_rules[slice_p] = _slice_masking_rule
 
 
 def _dynamic_slice_shape_rule(operand, *start_indices, **kwargs):
@@ -3540,15 +3560,15 @@ def _masking_defreducer(prim, identity):
   masking.masking_rules[prim] = partial(_reducer_masking_rule, prim, identity)
 
 def _reducer_masking_rule(prim, identity, padded_vals, logical_shapes,
-                          axes, input_shape):
-  del input_shape  # Unused.
+                          axes, input_shape=None):
   (padded_val,), (logical_shape,) = padded_vals, logical_shapes
   padded_shape = masking.padded_shape_as_value(padded_val.shape)
   masks = [broadcasted_iota(onp.int32, padded_shape, i) < d
            for i, d in enumerate(logical_shape) if i in axes]
   mask = _reduce(operator.and_, masks)
   masked_val = select(mask, padded_val, identity(padded_shape, padded_val.dtype))
-  return prim.bind(masked_val, axes=axes, input_shape=padded_shape)
+  bind = prim.bind if input_shape is None else partial(prim.bind, input_shape=padded_shape)
+  return bind(masked_val, axes=axes)
 
 reduce_p = standard_primitive(_reduce_shape_rule, _input_dtype, 'reduce',
                                         _reduce_translation_rule)
@@ -3588,7 +3608,8 @@ _masking_defreducer(reduce_sum_p,
                     lambda shape, dtype: onp.broadcast_to(onp.array(0, dtype), shape))
 
 
-def _reduce_op_shape_rule(operand, axes):
+def _reduce_op_shape_rule(operand, axes, input_shape=None):
+  del input_shape # unused.
   return tuple(onp.delete(operand.shape, axes))
 
 def _reduce_prod_translation_rule(c, operand, axes):
@@ -3632,6 +3653,8 @@ reduce_prod_p = standard_primitive(
   'reduce_prod', _reduce_prod_translation_rule)
 ad.defjvp(reduce_prod_p, _reduce_prod_jvp_rule)
 batching.defreducer(reduce_prod_p)
+_masking_defreducer(reduce_prod_p,
+                    lambda shape, dtype: onp.broadcast_to(onp.array(1, dtype), shape))
 
 
 def _reduce_chooser_shape_rule(operand, axes):
@@ -3659,7 +3682,8 @@ reduce_max_p = standard_primitive(_reduce_op_shape_rule, _input_dtype,
                                   'reduce_max', _reduce_max_translation_rule)
 ad.defjvp2(reduce_max_p, _reduce_chooser_jvp_rule)
 batching.defreducer(reduce_max_p)
-
+_masking_defreducer(reduce_max_p,
+                    lambda shape, dtype: onp.broadcast_to(onp.array(-onp.inf, dtype), shape))
 
 _reduce_min_translation_rule = partial(
     _reduce_chooser_translation_rule, min_p, _get_min_identity)
@@ -3667,7 +3691,8 @@ reduce_min_p = standard_primitive(_reduce_op_shape_rule, _input_dtype,
                                   'reduce_min', _reduce_min_translation_rule)
 ad.defjvp2(reduce_min_p, _reduce_chooser_jvp_rule)
 batching.defreducer(reduce_min_p)
-
+_masking_defreducer(reduce_min_p,
+                    lambda shape, dtype: onp.broadcast_to(onp.array(onp.inf, dtype), shape))
 
 def _reduce_logical_shape_rule(operand, axes):
   if operand.dtype != onp.bool_:

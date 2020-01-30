@@ -45,6 +45,7 @@ from jax.interpreters import ad
 from jax.interpreters import batching
 from jax.interpreters import partial_eval as pe
 from jax.interpreters import xla
+from jax.interpreters import masking
 from jax.util import prod
 from jax.abstract_arrays import Poly, to_index
 
@@ -190,10 +191,15 @@ def _threefry2x32_gpu_translation_rule(c, k1, k2, x1, x2):
   return cuda_prng.threefry2x32(
       c, (_broadcast(k1), _broadcast(k2)), (_broadcast(x1), _broadcast(x2)))
 
+def _threefry2x32_masking_rule(padded_vals, logical_shapes):
+  return threefry2x32_p.bind(*padded_vals)
+
 threefry2x32_p = core.Primitive("threefry2x32")
 threefry2x32_p.multiple_results = True
 threefry2x32_p.def_impl(partial(xla.apply_primitive, threefry2x32_p))
 threefry2x32_p.def_abstract_eval(_threefry2x32_abstract_eval)
+masking.masking_rules[threefry2x32_p] = _threefry2x32_masking_rule
+
 batching.defbroadcasting(threefry2x32_p)
 xla.translations[threefry2x32_p] = xla.lower_fun(
     partial(_threefry2x32_lowering, use_rolled_loops=False), instantiate=True)

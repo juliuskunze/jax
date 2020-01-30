@@ -32,6 +32,7 @@ from jax.lax.lax import _identity
 from jax.random import uniform, PRNGKey
 from jax.scipy.special import expit
 from operator import add, sub
+import scipy.stats
 
 config.parse_flags_with_absl()
 
@@ -67,10 +68,9 @@ class MaskingTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_add(self):
-    # TODO:
-    # self.check(add, ['(m, n)', 'n'], dict(m=3, n=3), '(m, n)')
-    # self.check(add, ['n', ''], dict(n=3), 'n')
-    # self.check(add, ['n', 'n'], dict(n=3), 'n')
+    self.check(add, ['(m, n)', 'n'], dict(m=3, n=3), '(m, n)', unpadded_vars=['n'])
+    self.check(add, ['n', ''], dict(n=3), 'n')
+    self.check(add, ['n', 'n'], dict(n=3), 'n')
 
     addvecs = mask(add, in_shapes=['n', 'n'], out_shape='n')
 
@@ -130,25 +130,43 @@ class MaskingTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_concatenate(self):
-    @partial(mask, in_shapes=['n', 'm', 'n'], out_shape='m + 2 * n')
-    def cat(x, y, z):
-      return lax.concatenate([x, y, z], 0)
+    self.check(lambda x, y, z: lax.concatenate([x, y, z], 0),
+               ['n', 'm', 'n'], dict(n=1, m=2), 'm + 2 * n')
 
-    ans = cat([np.array([1, 9]), np.array([2, 4, 9]), np.array([3, 9])],
-              dict(n=1, m=2))
-    expected = onp.array([1, 2, 4, 3])
-    self.assertAllClose(ans[:4], expected, check_dtypes=False)
+  def test_output_shape_error(self):
+    def thunk(skip_shapecheck=False):
+      self.check(lambda x: x, ['n'], dict(n=2), 'n+-1')
+
+    message = "Output shapes should be (n + -1,) but are (n,)."
+    self.assertRaisesWithLiteralMatch(ShapeError, message, thunk)
+    self.assertRaisesWithLiteralMatch(ShapeError, message, partial(thunk, skip_shapecheck=True))
+
+    def thunk(skip_shapecheck=False):
+      self.check(lambda x: np.split(x, 2),
+                 ['2*n'], dict(n=3), ['7*n', 'n'], unpadded_vars=['n'],
+                 skip_shapecheck=skip_shapecheck)
+
+    message = "Output shapes should be [(7 n,), (n,)] but are [(n,), (n,)]."
+    self.assertRaisesWithLiteralMatch(ShapeError, message, thunk)
+    self.assertRaisesWithLiteralMatch(ShapeError, message, partial(thunk, skip_shapecheck=True))
+
+  def test_output_tree_error(self):
+    def thunk(skip_shapecheck=False):
+      self.check(lambda x: np.split(x, 2), ['2*n'], dict(n=3), ('n', 'n'), unpadded_vars=['n'],
+                 skip_shapecheck=skip_shapecheck)
+    message = "Output shapes should be ((n,), (n,)) but are [(n,), (n,)]."
+    self.assertRaisesWithLiteralMatch(ShapeError, message, thunk)
+    self.assertRaisesWithLiteralMatch(ShapeError, message, partial(thunk, skip_shapecheck=True))
 
   def test_dot(self):
-    @partial(mask, in_shapes=['(m, k)', '(k, n)'], out_shape='(m, n)')
-    def dot(x, y):
-      return lax.dot(x, y)
+    self.check(lambda x, y: lax.dot(x, y),
+               ['(m, k)', '(k, n)'], dict(m=2, k=2, n=2), '(m, n)')
+    self.check(lambda A, b: np.dot(A, b), ['(m, n)', 'n'], dict(m=2, n=2), 'm')
 
-    x = onp.arange(6, dtype=onp.float32).reshape((2, 3))
-    y = onp.arange(12, dtype=onp.float32).reshape((3, 4))
-    ans = dot([x, y], dict(m=2, k=2, n=2))
-    expected = onp.dot(x[:2, :2], y[:2, :2])
-    self.assertAllClose(ans[:2, :2], expected, check_dtypes=False)
+    def thunk():
+      self.check(lambda A, b: lax.dot_general(A, b, [((0,), (0,)), ((), ())]),
+                 ['(m, n)', 'n'], dict(m=2, n=2), 'm')
+    self.assertRaisesRegex(TypeError, "", thunk)
 
   def test_mean(self):
     @partial(mask, in_shapes=['n'], out_shape='')
@@ -270,23 +288,26 @@ class MaskingTest(jtu.JaxTestCase):
         rtol=2e-2 if jtu.device_under_test() == "tpu" else 1e-5)
 
   def test_jit(self):
+    # TODO: check fun is actually jitted
     self.check(jit(lambda x: lax.concatenate([x, x], 0)), ['n'], dict(n=3), '2*n')
 
   def test_device_put(self):
     self.check(lambda x: np.device_put(x), ['n'], dict(n=3), 'n')
 
   def check(self, fun, input_shapes, values_dict,
-            out_shape=None, pad_dict=None, custom_inputs=None):
-    if out_shape is not None:
+            out_shape=None, unpadded_vars=None, custom_inputs=None,
+            skip_shapecheck=False, check_output=None):
+    if out_shape is not None and not skip_shapecheck:
       shapecheck(input_shapes, out_shape)(fun)
 
     masked_fun = mask(fun, input_shapes, out_shape)
 
-    all_pad_dict = defaultdict(lambda: 3)
-    if pad_dict is not None:
-      all_pad_dict.update(pad_dict)
+    pad_dict = defaultdict(lambda: 2)
+    if unpadded_vars is not None:
+      for var in unpadded_vars:
+        pad_dict[var] = 0
 
-    padded_values_dict = {k: values_dict[k] + all_pad_dict[k] for k in values_dict.keys()}
+    padded_values_dict = {k: values_dict[k] + pad_dict[k] for k in values_dict.keys()}
 
     input_shapes = map(_parse_shape_spec, input_shapes)
     concrete_shapes = map(
@@ -300,12 +321,25 @@ class MaskingTest(jtu.JaxTestCase):
     padded_input_shapes = map(partial(eval_polymorphic_shape,
                                       values_dict=padded_values_dict), input_shapes)
 
-    pad_widths = map(sub, map(onp.array, padded_input_shapes), concrete_shapes)
-    padded_inputs = list(map(lambda input, widths: np.pad(input, tuple((0, w) for w in widths), constant_values=-1), inputs, pad_widths))
+    pad_widths = map(sub, map(partial(onp.array, dtype=onp.int64), padded_input_shapes), concrete_shapes)
+    padded_inputs = [np.pad(input, tuple((0, w) for w in widths), constant_values=-1) if input.ndim > 0 else input
+                     for input, widths in zip(inputs, pad_widths)]
     out_ = fun(*inputs)
     padded_out = masked_fun(padded_inputs, values_dict)
-    out = padded_out[tuple(slice(None, k) for k in out_.shape)]
-    self.assertAllClose(out_, out, check_dtypes=True)
+
+    def check_padded_output(out_, padded_out):
+      out = padded_out[tuple(slice(None, k) for k in out_.shape)]
+
+      if check_output:
+        check_output(out_, out)
+      else:
+        self.assertAllClose(out_, out, check_dtypes=True)
+
+    assert type(out_) == type(padded_out)
+    if type(padded_out) in (tuple, list):
+      map(check_padded_output, out_, padded_out)
+    else:
+      check_padded_output(out_, padded_out)
 
   @parameterized.named_parameters({
                                     'testcase_name': "padding_config={}_shapes={}".format(
@@ -331,6 +365,10 @@ class MaskingTest(jtu.JaxTestCase):
       self.check(pad, ['n'], dict(n=shape[0]))
     else:
       self.check(pad, ['(m,n)'], dict(m=shape[0], n=shape[1]))
+
+  def test_pad_check_out_shape(self):
+    self.check(lambda x: lax.pad(x, np.array(0., x.dtype), [(1, 1, 1)]),
+               ['n'], dict(n=3), '2*n+1')
 
   def test_numpy_pad(self):
     def numpy_pad(x):
@@ -374,61 +412,52 @@ class MaskingTest(jtu.JaxTestCase):
         lhs_dilation=lhs_dilation, dimension_numbers=dimension_numbers)
 
     self.check(conv, [lhs_shape, rhs_shape], dict(n=1, i=3, o=2, h=1, w=2),
-               out_shape, pad_dict=dict(n=0, i=0, o=0))
+               out_shape, unpadded_vars=['n', 'i', 'o'])
 
   def test_indexing(self):
     self.check(lambda x: x[0], ['n'], dict(n=3), '')
     self.check(lambda x: x[-1], ['n'], dict(n=3), '')
     self.check(lambda x: x[..., -1], ['(n,a)'], dict(n=3, a=3), 'n')
 
-  def test_slicing(self):
+  def  test_slicing(self):
     self.check(lambda x: x[1:], ['n'], dict(n=3), 'n+-1')
     self.check(lambda x: x[:-1], ['n'], dict(n=3), 'n+-1')
+    self.check(lambda x: x[..., -1], ['(n,a)'], dict(n=3, a=3), 'n')
 
   def test_lax_slice(self):
-    raise SkipTest
-
     self.check(lambda x: lax.slice(x, (1,), (x.shape[0],)), ['n'], dict(n=3), 'n+-1')
-    self.check(lambda x: lax.slice(x, (x.shape[0] // 2,), (x.shape[0],)), ['2*n'], dict(n=3), 'n')
+    # TODO: self.check(lambda x: lax.slice(x, (x.shape[0] // 2,), (x.shape[0],)), ['2*n'], dict(n=3), 'n')
 
   def test_reshape(self):
     self.check(lambda x: np.reshape(x, (x.shape[0], x.shape[1] * x.shape[2])),
                ['n, a, b'], dict(n=1, a=2, b=3), 'n, a*b',
-               pad_dict=dict(a=0, b=0))
+               unpadded_vars=['a', 'b'])
 
-    message = "Reshaped dimensions have to be non-padded, so that logical and padded shapes match. " \
-              "This error is currently also raised when reshaped dimensions are not at the end, a case which is not yet implemented."
+    def check_shapes_match(out_, out):
+      self.assertEqual(out_.shape, out.shape)
 
-    self.assertRaisesWithLiteralMatch(
-      ValueError, message,
-      lambda: self.check(lambda x: x.ravel(), ['(n,m)'], dict(n=2, m=2), 'n*m'))
-    self.assertRaisesWithLiteralMatch(
-      ValueError, message,
-      lambda: self.check(lambda x: np.reshape(x, (x.shape[0] * x.shape[1], x.shape[2])),
-                         ['a, b, n'], dict(n=1, a=2, b=3), 'a*b, n',
-                         pad_dict=dict(a=0, b=0)))
+    # Only check for shapes in case of reshaping padded dimensions.
+    # Needed for random number generation:
+    self.check(lambda x: x.ravel(), ['(n,m)'], dict(n=2, m=2), 'n*m',
+               check_output=check_shapes_match)
+    self.check(lambda x: np.reshape(x, (x.shape[0] * x.shape[1], x.shape[2])),
+               ['a, b, n'], dict(n=1, a=2, b=3), 'a*b, n',
+               check_output=check_shapes_match)
+
+  def test_transpose(self):
+    self.check(lambda x: np.transpose(x, (1, 0, 2)),
+               ['(a, b, c)'], dict(a=1, b=2, c=3), 'b, a, c')
 
   def test_unsupported_op(self):
     p = jc.Primitive('unsupported_op')
     p.def_abstract_eval(_identity)
     p.def_impl(lambda x: x)
 
-    @partial(mask, in_shapes=['n'], out_shape='n')
-    def unsupported(x):
-      return p.bind(x)
-
     def thunk():
-      unsupported([np.zeros((1, ))], dict(n=1))
+      self.check(lambda x: p.bind(x), ['n'], dict(n=1), 'n')
 
-    self.assertRaisesWithLiteralMatch(NotImplementedError, "Masking rule for unsupported_op not implemented yet.", thunk)
-
-  def test_wrong_out_shape(self):
-    masked = mask(lambda x: x, in_shapes=['n'], out_shape='n+-1')
-
-    def thunk():
-      masked([np.zeros((1, ))], dict(n=1))
-
-    self.assertRaisesWithLiteralMatch(ShapeError, "Output shapes should be [(n + -1,)] but are [(n,)].", thunk)
+    message = "Masking rule for unsupported_op not implemented yet."
+    self.assertRaisesWithLiteralMatch(NotImplementedError, message, thunk)
 
   def test_nesting(self):
     raise SkipTest("not yet implemented")
@@ -452,15 +481,7 @@ class MaskingTest(jtu.JaxTestCase):
     self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_arange(self):
-    raise SkipTest("not yet implemented")
-
-    @partial(mask, in_shapes=['n'], out_shape='n')
-    def padded_add(x):
-      return x + np.arange(x.shape[0])
-
-    ans = padded_add([np.array([3, 1, 4, 1, 5])], dict(n=3))
-    expected = onp.array([3, 2, 6])
-    self.assertAllClose(ans[:3], expected, check_dtypes=False)
+    self.check(lambda x: -np.arange(x.shape[0]), ['n'], dict(n=3), 'n')
 
   def test_sum_2d(self):
     self.check(lambda x: np.sum(x), ['(m, n)'], dict(m=3, n=3), '')
@@ -468,19 +489,64 @@ class MaskingTest(jtu.JaxTestCase):
   def test_expit(self):
     self.check(lambda x: expit(x), ['n'], dict(n=3), 'n')
 
-  def test_uniform(self):
-    raise SkipTest
+  @parameterized.named_parameters(jtu.cases_from_list(
+    {"testcase_name": "_{}".format(dtype), "dtype": onp.dtype(dtype).name}
+    for dtype in [onp.float32, onp.float64]))
+  def test_uniform(self, dtype):
+    # TODO: how to allow input shape `n`?
+    #  random.threefry_2x32 handles even and odd sizes differently,
+    #  making general size `n` fail.
 
-    self.check(lambda x: random.uniform(PRNGKey(0), x.shape), ['2*n'], dict(n=3), '2*n', custom_inputs={0: PRNGKey(0)})
+    @shapecheck(['2', '2*n+1'], '2*n+1')
+    @shapecheck(['2', '2*n'], '2*n')
+    def sample(key, x):
+      # TODO remove workaround by allow specifying types in type specs:
+      key = key.astype(onp.uint64)
+      return random.uniform(key, x.shape, dtype)
+
+    # TODO currently random.uniform(k, (2,)) != random.uniform(k, (3,))[:2]
+    def check_output(expected_out, out):
+      assert expected_out.shape == out.shape
+      fail_prob = 0.01  # conservative bound on statistical fail prob by Kolmo CDF
+      self.assertGreater(scipy.stats.kstest(out, scipy.stats.uniform().cdf).pvalue, fail_prob)
+
+    self.check(sample, ['2', '2*n'], dict(n=10000), '2*n',
+               custom_inputs={0: PRNGKey(0)},
+               check_output=check_output)
+
+  def test_zeros(self):
+    self.check(lambda x: -np.zeros(x.shape), ['n'], dict(n=3), 'n')
+
+  def test_ones(self):
+    self.check(lambda x: -np.ones(x.shape), ['n'], dict(n=3), 'n')
+
+  def test_broadcast_to(self):
+    self.check(lambda x: -np.broadcast_to(0, x.shape), ['n'], dict(n=3), 'n')
 
   def test_broadcast_in_dim(self):
-    raise SkipTest
+    self.check(lambda x: -lax.broadcast_in_dim(np.zeros((1, 1)), shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2)),
+               ['(n, 1)'], dict(n=3), '(3, n, 4)')
 
-    @partial(mask, in_shapes=['(n, 1)'], out_shape='(3, n, 4)')
-    def broadcast_in_dim(x):
-      return -lax.broadcast_in_dim(x, shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2))
+  def test_destructure(self):
+    def d(key):
+      key1, key2 = key
+      return key1
 
-    broadcast_in_dim([np.zeros((2, 1))], dict(n=1))
+    self.check(d, ['2'], dict(), '')
+
+  def test_where(self):
+    self.check(lambda x: -np.where(x < 0, x, 0.), ['n'], dict(n=3), 'n')
+    # TODO: self.check(lambda x: -np.where(x < 0, x, np.zeros_like(x)), ['n'], dict(n=3), 'n')
+
+  def test_split(self):
+    self.check(lambda x: np.split(x, 2), ['2*n'], dict(n=3), ['n', 'n'], unpadded_vars=['n'])
+    self.check(lambda x: np.split(x, [10]), ['n'], dict(n=15), ['10', 'n+-10'], unpadded_vars=['n'])
+
+  @parameterized.named_parameters(jtu.cases_from_list([{
+    'testcase_name': "operator={}".format(operator.__name__), 'operator': operator}
+    for operator in [np.sum, np.prod, np.max, np.min]]))
+  def test_reduce(self, operator):
+    self.check(operator, ['(m, n)'], dict(m=3, n=3), '', unpadded_vars=['m', 'n'])
 
 if __name__ == '__main__':
   absltest.main()

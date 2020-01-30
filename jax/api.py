@@ -1022,32 +1022,38 @@ def mask(fun, in_shapes, out_shape=None):
   in_specs  = map(partial(_remap_ids, unique_ids), in_specs)
 
   if out_shape:
-    out_specs, out_shapes_tree = tree_flatten(out_shape)
+    out_specs, out_tree_ = tree_flatten(out_shape)
     out_specs = map(_parse_shape_spec, out_specs)
     out_specs = map(partial(_remap_ids, unique_ids), out_specs)
 
   def wrapped_fun(args, logical_env):
     args_flat, in_tree = tree_flatten(args)
-    if in_tree != in_shapes_tree: raise TypeError("pytree mismatch")
+    if in_tree != in_shapes_tree: 
+      raise TypeError("Tree mismatch: Input {} and shape spec {}.".format(in_tree, in_shapes_tree))
     logical_env = {unique_ids[name] : val for name, val in logical_env.items()}
     in_shapes = map(_finalize_shape_spec, in_specs, map(onp.shape, args_flat))
     padded_env = _bind_shapes(in_shapes, [x.shape for x in args_flat])
     f = lu.wrap_init(fun)
-    flat_fun, out_tree = flatten_fun_nokwargs(f, in_tree)
+    flat_fun, out_tree_thunk = flatten_fun_nokwargs(f, in_tree)
     outs, out_shapes = masking.mask_fun(
         flat_fun, logical_env, padded_env, args_flat, in_shapes)
+    out_tree = out_tree_thunk()
+    out_shapes = list(out_shapes)
 
     if out_shape:
-      if not out_tree() == out_shapes_tree: raise TypeError("pytree mismatch")
       out_shapes_ = map(_finalize_shape_spec, out_specs, map(onp.shape, outs))
-      if not out_shapes_ == list(out_shapes):
-        raise ShapeError("Output shapes should be {} but are {}.".format(out_shapes_, list(out_shapes)))
-
       padded_out_shapes = map(onp.shape, outs)
       padded_out_shapes_ = map(partial(eval_polymorphic_shape, values_dict=padded_env), out_shapes_)
+
+      if out_tree != out_tree_ or not out_shapes_ == out_shapes:
+        out_shapes_ = tree_unflatten(out_tree_, out_shapes_)
+        out_shapes = tree_unflatten(out_tree, out_shapes)
+        raise ShapeError("Output shapes should be {} but are {}.".format(out_shapes_, out_shapes))
       if not all(shape_ == shape for shape_, shape in zip(padded_out_shapes_, padded_out_shapes)):
+        padded_out_shapes_ = tree_unflatten(out_tree_, padded_out_shapes_)
+        padded_out_shapes = tree_unflatten(out_tree, padded_out_shapes)
         raise ShapeError("Padded output shapes should be {} but are {}.".format(padded_out_shapes_, padded_out_shapes))
-    return tree_unflatten(out_tree(), outs)
+    return tree_unflatten(out_tree, outs)
   return wrapped_fun
 
 class _UniqueId:
@@ -1090,15 +1096,16 @@ def _bind_shapes(polymorphic_shapes, shapes):
 def shapecheck(in_shapes, out_shape, fun):
   in_shapes, in_tree = tree_flatten(in_shapes)
   in_shapes = map(_parse_shape_spec, in_shapes)
-  out_shapes, out_tree = tree_flatten(out_shape)
-  out_shapes = map(_parse_shape_spec, out_shapes)
-  flat_fun, out_tree_ = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
+  out_shapes_, out_tree_ = tree_flatten(out_shape)
+  out_shapes_ = map(_parse_shape_spec, out_shapes_)
+  flat_fun, out_tree_thunk = flatten_fun_nokwargs(lu.wrap_init(fun), in_tree)
   avals = map(partial(ShapedArray, dtype=onp.float32), in_shapes)
-  out_shapes_ = [o.shape for o in polymorphic.abstract_eval_fun(flat_fun.call_wrapped, *avals)]
-  if out_tree != out_tree_():
-    raise TypeError("pytree mismatch")
-  if not all(map(_shape_spec_consistent, out_shapes, out_shapes_)):
-    raise ShapeError
+  out_shapes = [o.shape for o in polymorphic.abstract_eval_fun(flat_fun.call_wrapped, *avals)]
+  out_tree = out_tree_thunk()
+  if out_tree_ != out_tree or not all(map(_shape_spec_consistent, out_shapes_, out_shapes)):
+    out_shapes_ = tree_unflatten(out_tree_, map(tuple, out_shapes_))
+    out_shapes = tree_unflatten(out_tree, map(tuple, out_shapes))
+    raise ShapeError("Output shapes should be {} but are {}.".format(out_shapes_, out_shapes))
   return fun
 
 class ShapeError(Exception): pass
@@ -1176,8 +1183,8 @@ class S_(object):
 
 s_ = S_()
 
-def _shape_spec_consistent(spec, expr):
-  return all(a == b for a, b in zip(spec, expr) if a is not _monomorphic_dim)
+def _shape_spec_consistent(spec, shape):
+  return all(a == b for a, b in zip(spec, shape) if a is not _monomorphic_dim)
 
 
 def jvp(fun, primals, tangents):
