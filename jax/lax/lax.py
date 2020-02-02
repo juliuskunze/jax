@@ -2200,9 +2200,7 @@ def _conv_general_dilated_masking_rule(
         lhs_shape, rhs_shape, precision):
   lhs, rhs = padded_vals
   logical_lhs_shape, rhs_shape = logical_shapes
-  assert rhs.shape == rhs_shape
   n, c, *padded_dimensions = dimension_numbers.lhs_spec
-  assert onp.all((onp.array(lhs.shape) == logical_lhs_shape)[(n, c),])
 
   return conv_general_dilated(
     _masked(lhs, logical_lhs_shape, padded_dimensions), rhs,
