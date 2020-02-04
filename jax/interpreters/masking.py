@@ -140,9 +140,7 @@ class MaskTrace(Trace):
   def process_call(self, call_primitive, f, tracers, params):
     vals, polymorphic_shapes = unzip2((t.val, t.polymorphic_shape) for t in tracers)
     f, out_shapes_thunk = mask_subtrace(f, self.master, polymorphic_shapes)
-    # TODO use call_primitive.bind(f, *vals, **params) instead here.
-    #  currently breaks MaskingTest.test_where
-    out_vals = f.call_wrapped(*vals)
+    out_vals = call_primitive.bind(f, *vals, **params)
     return map(partial(MaskTracer, self), out_vals, out_shapes_thunk())
 
   def post_process_call(self, call_primitive, out_tracers, params):

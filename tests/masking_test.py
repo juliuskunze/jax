@@ -342,8 +342,19 @@ class MaskingTest(jtu.JaxTestCase):
     self.assertRaisesRegex(TypeError, "", thunk)
 
   def test_jit(self):
-    # TODO: check fun is actually jitted
-    self.check(jit(lambda x: lax.concatenate([x, x], 0)), ['n'], dict(n=np.array([2, 3])), '2*n')
+    @partial(mask, in_shapes=['n'], out_shape='2*n')
+    @jit
+    def duplicate(x):
+      assert python_should_be_executing
+      return lax.concatenate([x, x], 0)
+
+    python_should_be_executing = True
+    out = duplicate([np.arange(3)], dict(n=2))
+    assert onp.all(onp.array([0, 1, 0, 1]) == out[:4])
+
+    python_should_be_executing = False
+    out = duplicate([np.arange(3)], dict(n=2))
+    assert onp.all(onp.array([0, 1, 0, 1]) == out[:4])
 
   def test_device_put(self):
     self.check(lambda x: np.device_put(x), ['n'], dict(n=np.array([2, 3])), 'n')
