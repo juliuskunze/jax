@@ -26,7 +26,7 @@ from jax.api import _parse_shape_spec
 from jax.interpreters.masking import shape_as_value
 from jax import numpy as np, test_util as jtu, mask, vmap, jit, grad, lax, \
   ShapeError, core as jc, shapecheck, eval_polymorphic_shape, safe_map, \
-  safe_zip, random, unzip2, tree_flatten, tree_unflatten, tree_map
+  safe_zip, unzip2, tree_flatten, tree_unflatten, tree_map
 from jax.config import config
 from jax.lax.lax import _identity
 from jax.random import uniform, PRNGKey
@@ -469,26 +469,27 @@ class MaskingTest(jtu.JaxTestCase):
     {"testcase_name": "_{}".format(dtype), "dtype": onp.dtype(dtype).name}
     for dtype in [onp.float32, onp.float64]))
   def test_uniform(self, dtype):
-    # TODO: how to allow input shape `n`?
-    #  random.threefry_2x32 handles even and odd sizes differently,
-    #  making general size `n` fail.
-
-    @shapecheck(['2', '2*n+1'], '2*n+1')
-    @shapecheck(['2', '2*n'], '2*n')
-    def sample(key, x):
-      # TODO remove, allow to specify types in type specs instead:
-      key = key.astype(onp.uint64)
-      return random.uniform(key, x.shape, dtype)
-
     # TODO remove, needs fix for https://github.com/google/jax/issues/2155
-    def check_output(expected_out, out):
+    def check_uniform(expected_out, out):
       assert expected_out.shape == out.shape
       fail_prob = 0.01  # conservative bound on statistical fail prob by Kolmo CDF
       self.assertGreater(scipy.stats.kstest(out, scipy.stats.uniform().cdf).pvalue, fail_prob)
 
-    self.check(sample, ['2', '2*n'], dict(n=np.array((10000, 2000))), '2*n',
+    def sample_like(x):
+      return uniform(PRNGKey(0), x.shape, dtype)
+
+    # TODO: how to allow input shape `n`?
+    #  random.threefry_2x32 handles even and odd sizes differently,
+    #  making general size `n` fail.
+    self.check(sample_like, ['2*n'], dict(n=np.array([10000, 2000])), '2*n',
+               check_output_fun=check_uniform)
+    self.check(sample_like, ['2*n+1'], dict(n=np.array([10000, 2000])), '2*n+1',
+               check_output_fun=check_uniform)
+    # TODO remove key.astype(...), allow to specify type in type spec instead:
+    self.check(lambda key, x: uniform(key.astype(onp.uint64), x.shape, dtype),
+               ['2', '2*n'], dict(n=np.array((10000, 2000))), '2*n',
                custom_inputs={0: PRNGKey(0)},
-               check_output_fun=check_output)
+               check_output_fun=check_uniform)
 
   def test_zeros(self):
     self.check(lambda x: -np.zeros(x.shape), ['n'], dict(n=np.array([2, 3])), 'n')

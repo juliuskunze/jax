@@ -49,7 +49,6 @@ from jax.interpreters import masking
 from jax.util import prod
 from jax.abstract_arrays import Poly, to_index
 
-
 def PRNGKey(seed):
   """Create a pseudo-random number generator (PRNG) key given an integer seed.
 
@@ -330,7 +329,7 @@ def uniform(key, shape=(), dtype=onp.float64, minval=0., maxval=1.):
   dtype = dtypes.canonicalize_dtype(dtype)
   return _uniform(key, shape, dtype, minval, maxval)
 
-@partial(jit, static_argnums=(1, 2))
+# TODO @partial(jit, static_argnums=(1, 2)), currently breaks MaskingTest.test_uniform:
 def _uniform(key, shape, dtype, minval, maxval):
   _check_shape("uniform", shape)
   if not np.issubdtype(dtype, onp.floating):

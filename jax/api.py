@@ -1085,8 +1085,10 @@ def _bind_shapes(polymorphic_shapes, shapes):
       if type(poly) is not Poly or poly.is_constant:
         if int(poly) != d: raise ShapeError
       else:
-        ((id,), count), = poly.items()
-        d, r = divmod(d, count)
+        poly = poly.copy()
+        const_coeff = poly.pop(Mon({}), 0)
+        ((id,), linear_coeff), = poly.items()
+        d, r = divmod(d - const_coeff, linear_coeff)
         assert r == 0
         if env.setdefault(id, d) != d: raise ShapeError
   return env
