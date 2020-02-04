@@ -2183,7 +2183,7 @@ def _conv_general_dilated_batch_rule(
       out = _reshape_axis_into(out_spec[1], out_spec[1] + 1, out)
       return out, out_spec[1]
 
-def _masked(x, logical_shape, dimensions):
+def _masked(x, logical_shape, dimensions, value=0):
   if len(dimensions) == 0:
     return x
 
@@ -2192,7 +2192,7 @@ def _masked(x, logical_shape, dimensions):
   mask_intersection = masks[0]
   for mask in masks[1:]:
     mask_intersection &= mask
-  return select(mask_intersection, x, zeros_like_array(x))
+  return select(mask_intersection, x, full_like(x, value))
 
 def _conv_general_dilated_masking_rule(
         padded_vals, logical_shapes, window_strides, padding, lhs_dilation,
@@ -2600,13 +2600,12 @@ def _pad_masking_rule(padded_vals, logical_shapes, padding_config):
   operand, padding_value = padded_vals
   shape, _ = logical_shapes
 
-  result = pad(operand, padding_value, padding_config)
-  for i, (lo, hi, interior) in enumerate(padding_config):
-    hi_pad_slice = [_slice(None)] * len(shape)
-    hi_pad_slice[i] = _slice(lo + shape[i] * (interior + 1), None)
-    result = index_update(result, hi_pad_slice, padding_value)
-
-  return result
+  out = pad(operand, padding_value, padding_config)
+  out_shape = [lo + shape[i] * (interior + 1)
+               for i, (lo, hi, interior) in enumerate(padding_config)]
+  padded_dims = [i for i, config in enumerate(padding_config)
+                 if config != (0, 0, 0)]
+  return _masked(out, out_shape, padded_dims, padding_value)
 
 
 pad_p = standard_primitive(_pad_shape_rule, _pad_dtype_rule, 'pad')

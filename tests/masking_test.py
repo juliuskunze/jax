@@ -70,7 +70,10 @@ class MaskingTest(jtu.JaxTestCase):
 
   def check(self, fun, input_shapes, values_dict,
             out_shape=None, unpadded_vars=None, custom_inputs=None,
-            skip_shapecheck=False, check_output=None):
+            skip_shapecheck=False, check_output_fun=None):
+    """Checks shapecheck and mask on the given function.
+    If value_dict entries contain multiple values, vmap(mask) is tested as well,
+    in addition to testing mask using the first element of each entry."""
     if out_shape is not None and not skip_shapecheck:
       shapecheck(input_shapes, out_shape)(fun)
 
@@ -98,7 +101,7 @@ class MaskingTest(jtu.JaxTestCase):
       if is_vectorized else [batched_concrete_input_shapes])
 
     def expected_outs_and_padded_inputs(concrete_input_shapes):
-      inputs = list(map(partial(uniform, PRNGKey(0)), concrete_input_shapes))
+      inputs = list(map(onp.random.random_sample, concrete_input_shapes))
 
       if custom_inputs is not None:
         for index, value in custom_inputs.items():
@@ -114,8 +117,8 @@ class MaskingTest(jtu.JaxTestCase):
     def check_padded_output(out_, padded_out):
       out = padded_out[tuple(slice(None, k) for k in out_.shape)]
 
-      if check_output:
-        check_output(out_, out)
+      if check_output_fun:
+        check_output_fun(out_, out)
       else:
         self.assertAllClose(out_,  out, check_dtypes=True)
 
@@ -362,26 +365,24 @@ class MaskingTest(jtu.JaxTestCase):
               (((-1, -2, 2),), (5,)),
               (((-1, -2, 1), (1, 2, 2)), (4, 2))))
   def test_pad(self, padding_config, shape):
-    # TODO vmap
     def pad(x):
       return lax.pad(x, np.array(1., x.dtype), padding_config)
 
-    if len(shape) == 1:
-      self.check(pad, ['n'], dict(n=shape[0]))
-    else:
-      self.check(pad, ['(m,n)'], dict(m=shape[0], n=shape[1]))
+    flat = len(shape) == 1
+    value_dict = dict(
+      [('h', np.array([shape[0], shape[0] + 1]))] +
+      ([] if flat else [('w', np.array([shape[1], shape[1] + 1]))]))
+    self.check(pad, ['h' if flat else '(h,w)'], value_dict)
 
   def test_pad_check_out_shape(self):
-    # TODO vmap
     self.check(lambda x: lax.pad(x, np.array(0., x.dtype), [(1, 1, 1)]),
-               ['n'], dict(n=3), '2*n+1')
+               ['n'], dict(n=np.array([2, 3])), '2*n+1')
 
   def test_numpy_pad(self):
     def numpy_pad(x):
       return np.pad(x, (0, 1), constant_values=np.array(5., x.dtype))
 
-    # TODO vmap
-    self.check(numpy_pad, ['n'], dict(n=3), 'n+1')
+    self.check(numpy_pad, ['n'], dict(n=np.array([2, 3])), 'n+1')
 
   @parameterized.named_parameters(jtu.cases_from_list(
     {
@@ -446,10 +447,10 @@ class MaskingTest(jtu.JaxTestCase):
       self.assertEqual(out_.shape, out.shape)
 
     self.check(lambda x: x.ravel(), ['(n,m)'], dict(n=np.array([2, 3]), m=np.array([2, 3])), 'n*m',
-               check_output=check_shapes_match)
+               check_output_fun=check_shapes_match)
     self.check(lambda x: np.reshape(x, (x.shape[0] * x.shape[1], x.shape[2])),
                ['a, b, n'], dict(n=np.array([2, 3]), a=np.array([2, 3]), b=np.array([3, 2])), 'a*b, n',
-               check_output=check_shapes_match)
+               check_output_fun=check_shapes_match)
 
   def test_transpose(self):
     self.check(lambda x: np.transpose(x, (1, 0, 2)),
@@ -475,11 +476,11 @@ class MaskingTest(jtu.JaxTestCase):
     @shapecheck(['2', '2*n+1'], '2*n+1')
     @shapecheck(['2', '2*n'], '2*n')
     def sample(key, x):
-      # TODO remove workaround by allow specifying types in type specs:
+      # TODO remove, allow to specify types in type specs instead:
       key = key.astype(onp.uint64)
       return random.uniform(key, x.shape, dtype)
 
-    # TODO currently random.uniform(k, (2,)) != random.uniform(k, (3,))[:2]
+    # TODO remove, needs fix for https://github.com/google/jax/issues/2155
     def check_output(expected_out, out):
       assert expected_out.shape == out.shape
       fail_prob = 0.01  # conservative bound on statistical fail prob by Kolmo CDF
@@ -487,7 +488,7 @@ class MaskingTest(jtu.JaxTestCase):
 
     self.check(sample, ['2', '2*n'], dict(n=np.array((10000, 2000))), '2*n',
                custom_inputs={0: PRNGKey(0)},
-               check_output=check_output)
+               check_output_fun=check_output)
 
   def test_zeros(self):
     self.check(lambda x: -np.zeros(x.shape), ['n'], dict(n=np.array([2, 3])), 'n')
