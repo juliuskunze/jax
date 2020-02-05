@@ -1055,7 +1055,7 @@ else:
 # The `jit` on `where` exists to avoid materializing constants in cases like
 # `np.where(np.zeros(1000), 7, 4)`. In op-by-op mode, we don't want to
 # materialize the broadcast forms of scalar arguments.
-# TODO @jit this, currently breaks mask(pcnn):
+@jit
 def _where(condition, x=None, y=None):
   if x is None or y is None:
     raise ValueError("Either both or neither of the x and y arguments should "
@@ -2953,7 +2953,8 @@ def _index_to_gather(x_shape, idx):
         isinstance(abstract_i, ShapedArray)) and _int(abstract_i):
       i = _normalize_index(i, x_shape[x_axis])
       # dummy index if is polynomial, doesn't matter for shape inference:
-      i = masking.try_get_shape_dim_as_value(i, 0) if type(i) is Poly else lax.convert_element_type(i, int32)
+      i = masking.poly_as_value_if_tracing(i)
+      i = 0 if type(i) is Poly else lax.convert_element_type(i, int32)
       i = broadcast_to(i, tuple(gather_indices.shape[:-1]) + (1,))
       gather_indices = concatenate((gather_indices, i), -1)
       collapsed_slice_dims.append(x_axis)

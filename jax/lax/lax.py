@@ -1114,7 +1114,7 @@ def _iota_abstract_eval(dummy, dtype, size):
   return ConcreteArray(_iota_impl(dummy, dtype=dtype, size=size))
 
 def _iota_masking_rule(padded_vals, logical_shapes, dtype, size):
-  return _iota_impl(None, dtype, masking.padded_shape_dim_as_value(size))
+  return _iota_impl(None, dtype, masking.padded_poly_as_value(size))
 
 iota_p = Primitive('iota')
 iota_p.def_impl(_iota_impl)
@@ -2453,14 +2453,20 @@ def _broadcast_in_dim_masking_rule(padded_vals, logical_shapes, shape, broadcast
                           shape=masking.padded_shape_as_value(shape),
                           broadcast_dimensions=broadcast_dimensions)
 
-broadcast_in_dim_p = standard_primitive(
-    _broadcast_in_dim_shape_rule, _input_dtype, 'broadcast_in_dim')
+def _broadcast_in_dim_translation_rule(c, operand, shape, broadcast_dimensions):
+  shape = masking.padded_shape_as_value_if_tracing(shape)
+  return standard_translate(
+    'broadcast_in_dim', c, operand, shape=shape,
+    broadcast_dimensions=broadcast_dimensions)
+
+broadcast_in_dim_p = Primitive('broadcast_in_dim')
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
 ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
 broadcast_in_dim_p.def_abstract_eval(_broadcast_abstract_eval)
 pe.custom_partial_eval_rules[broadcast_in_dim_p] = _jaxpr_process_primitive_without_lowering(broadcast_in_dim_p)
 masking.masking_rules[broadcast_in_dim_p] = _broadcast_in_dim_masking_rule
+xla.translations[broadcast_in_dim_p] = _broadcast_in_dim_translation_rule
 
 def _clamp_shape_rule(min, operand, max):
   if min.shape and min.shape != operand.shape:
@@ -2770,13 +2776,16 @@ masking.masking_rules[transpose_p] = _transpose_masking_rule
 
 
 def _select_shape_rule(pred, on_true, on_false):
-  if on_true.shape != on_false.shape:
+  pred_shape = masking.padded_shape_as_value_if_tracing(pred.shape)
+  on_true_shape = masking.padded_shape_as_value_if_tracing(on_true.shape)
+  on_false_shape = masking.padded_shape_as_value_if_tracing(on_false.shape)
+  if on_true_shape != on_false_shape:
     msg = "select on_true and on_false must have the same shape, got {} and {}."
-    raise TypeError(msg.format(on_true.shape, on_false.shape))
-  if pred.shape and pred.shape != on_true.shape:
+    raise TypeError(msg.format(on_true_shape, on_false_shape))
+  if pred_shape and pred_shape != on_true_shape:
     msg = ("select pred must be scalar or have the same shape as on_true and "
            "on_false, got pred shape {} for on_true and on_false of shape {}.")
-    raise TypeError(msg.format(pred.shape, on_true.shape))
+    raise TypeError(msg.format(pred_shape, on_true_shape))
   return on_true.shape
 
 def _select_dtype_rule(pred, on_true, on_false):
@@ -2824,7 +2833,8 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   if not onp.shape(on_true) == onp.shape(on_false) == ():
     on_true = batching.bdim_at_front(on_true, ot_bdim, size)
     on_false = batching.bdim_at_front(on_false, of_bdim, size)
-  assert onp.shape(on_true) == onp.shape(on_false)
+  assert (masking.padded_shape_as_value_if_tracing(on_true.shape) ==
+          masking.padded_shape_as_value_if_tracing(on_false.shape))
   if 0 < onp.ndim(pred) < onp.ndim(on_true):
     # vmapped function had a scalar pred with nonscalar args
     assert onp.ndim(pred) == 1

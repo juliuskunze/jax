@@ -262,10 +262,10 @@ def is_polymorphic(shape):
   return any(map(lambda d: type(d) is Poly, shape))
 
 def eval_polymorphic_shape(shape, values_dict):
-  return tuple(eval_polymorphic_dim(dim, values_dict) for dim in shape)
+  return tuple(eval_poly(dim, values_dict) for dim in shape)
 
-def eval_polymorphic_dim(dim, values_dict):
-  return dim.evaluate(values_dict) if type(dim) is Poly else dim
+def eval_poly(poly, values_dict):
+  return poly.evaluate(values_dict) if type(poly) is Poly else poly
 
 def _ensure_poly(p):
   if type(p) is Poly:

@@ -356,6 +356,12 @@ class MaskingTest(jtu.JaxTestCase):
     out = duplicate([np.arange(3)], dict(n=2))
     assert onp.all(onp.array([0, 1, 0, 1]) == out[:4])
 
+    @jit
+    def broadcast_like(x, target):
+      return np.broadcast_to(x, target.shape)
+
+    self.check(lambda t: broadcast_like(0., t), ['n'], dict(n=2))
+
   def test_device_put(self):
     self.check(lambda x: np.device_put(x), ['n'], dict(n=np.array([2, 3])), 'n')
 
@@ -496,7 +502,7 @@ class MaskingTest(jtu.JaxTestCase):
                check_output_fun=check_uniform)
     self.check(sample_like, ['2*n+1'], dict(n=np.array([10000, 2000])), '2*n+1',
                check_output_fun=check_uniform)
-    # TODO remove key.astype(...), allow to specify type in type spec instead:
+    # TODO remove key.astype(...), allow to specify type in spec instead:
     self.check(lambda key, x: uniform(key.astype(onp.uint64), x.shape, dtype),
                ['2', '2*n'], dict(n=np.array((10000, 2000))), '2*n',
                custom_inputs={0: PRNGKey(0)},
@@ -523,8 +529,10 @@ class MaskingTest(jtu.JaxTestCase):
     self.check(d, ['2'], dict(), '')
 
   def test_where(self):
-    self.check(lambda x: -np.where(x < 0, x, 0.), ['n'], dict(n=np.array([2, 3])), 'n')
-    # TODO: self.check(lambda x: -np.where(x < 0, x, np.zeros_like(x)), ['n'], dict(n=3), 'n')
+    self.check(lambda x: np.where(x < 0, x, np.zeros_like(x)), ['n'], dict(n=np.array([2, 3])), 'n')
+    self.check(lambda x: np.where(x < 0, x, 0.), ['n'], dict(n=np.array([2, 3])), 'n')
+    self.check(lambda x: np.where(x < 0, 0., x), ['n'], dict(n=np.array([2, 3])), 'n')
+    self.check(lambda x: np.where(x < 0, 0., 0.), ['n'], dict(n=np.array([2, 3])), 'n')
 
   def test_split(self):
     self.check(lambda x: np.split(x, 2), ['2*n'], dict(n=np.array([4, 4])), ['n', 'n'], unpadded_vars=['n'])

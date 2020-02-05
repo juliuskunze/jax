@@ -8,7 +8,7 @@ from .. import core
 from ..core import Trace, Tracer
 from ..util import safe_map, safe_zip, unzip2
 from ..abstract_arrays import ShapedArray, Poly, eval_polymorphic_shape, \
-  eval_polymorphic_dim
+  eval_poly
 from .. import linear_util as lu
 from . import polymorphic
 
@@ -37,7 +37,7 @@ ShapeEnvs = namedtuple("ShapeEnvs", ["logical", "padded"])
 shape_envs = ShapeEnvs({}, {})  # TODO(mattjj): make this a stack for efficiency
 
 def is_tracing():
-  return shape_envs.padded
+  return bool(shape_envs.padded)
 
 @contextmanager
 def extend_shape_envs(logical_env, padded_env):
@@ -53,17 +53,20 @@ def extend_shape_envs(logical_env, padded_env):
 def shape_as_value(shape):
   return eval_polymorphic_shape(shape, shape_envs.logical)
 
-def shape_dim_as_value(dim):
-  return eval_polymorphic_dim(dim, shape_envs.logical)
+def poly_as_value(dim):
+  return eval_poly(dim, shape_envs.logical)
 
-def try_get_shape_dim_as_value(dim, default=None):
-  return shape_dim_as_value(dim) if shape_envs.logical else default
+def poly_as_value_if_tracing(dim):
+  return poly_as_value(dim) if is_tracing() else dim
 
 def padded_shape_as_value(shape):
   return eval_polymorphic_shape(shape, shape_envs.padded)
 
-def padded_shape_dim_as_value(shape):
-  return eval_polymorphic_dim(shape, shape_envs.padded)
+def padded_shape_as_value_if_tracing(shape):
+  return padded_shape_as_value(shape) if is_tracing() else shape
+
+def padded_poly_as_value(shape):
+  return eval_poly(shape, shape_envs.padded)
 
 def mask_fun(fun, logical_env, padded_env, in_vals, polymorphic_shapes):
   with core.new_master(MaskTrace) as master:
@@ -89,13 +92,16 @@ class MaskTracer(Tracer):
   def __init__(self, trace, val, polymorphic_shape):
     self.trace = trace
     self.val = val
-    # TODO this breaks tests but is used in aval:
-    # assert self.val.dtype
     self.polymorphic_shape = polymorphic_shape
 
   @property
   def aval(self):
-    return ShapedArray(self.polymorphic_shape, self.val.dtype)
+    return ShapedArray(self.polymorphic_shape, self.dtype)
+
+  @property
+  def dtype(self):
+    # TODO clean this up:
+    return self.val.dtype if hasattr(self.val, 'dtype') else type(self.val)
 
   def is_pure(self):
     return all(type(poly) is not Poly or poly.is_constant
