@@ -135,20 +135,23 @@ class MaskingTest(jtu.JaxTestCase):
 
     if is_vectorized:
       expected_outs_list, padded_inputs_list = unzip2(expected_outs_and_padded_ins)
-      v_masked_fun = vmap(masked_fun)
-      input_count = len(padded_inputs_list[0])
-      padded_v_inputs = [onp.array([padded_inputs[i] for padded_inputs in padded_inputs_list]) for i in range(input_count)]
-      padded_v_outs = v_masked_fun(padded_v_inputs, values_dict)
-      padded_outs_list = [tree_map(lambda x: x[i], padded_v_outs) for i in range(batch_size)]
-      for outs_, padded_outs in zip(expected_outs_list, padded_outs_list):
-        check_outputs(outs_, padded_outs)
+
+      for maybe_jit in [jit, lambda fun: fun]:
+        v_masked_fun = maybe_jit(vmap(masked_fun))
+        input_count = len(padded_inputs_list[0])
+        padded_v_inputs = [onp.array([padded_inputs[i] for padded_inputs in padded_inputs_list]) for i in range(input_count)]
+        padded_v_outs = v_masked_fun(padded_v_inputs, values_dict)
+        padded_outs_list = [tree_map(lambda x: x[i], padded_v_outs) for i in range(batch_size)]
+        for outs_, padded_outs in zip(expected_outs_list, padded_outs_list):
+          check_outputs(outs_, padded_outs)
 
     outs_, padded_inputs = expected_outs_and_padded_ins[0]
     if is_vectorized:
       values, tree = tree_flatten(values_dict)
       values_dict = tree_unflatten(tree, [x[0] for x in onp.broadcast_arrays(*values)])
-    padded_outs = masked_fun(padded_inputs, values_dict)
-    check_outputs(outs_, padded_outs)
+    for maybe_jit in [jit, lambda fun: fun]:
+      padded_outs = maybe_jit(masked_fun)(padded_inputs, values_dict)
+      check_outputs(outs_, padded_outs)
 
 
   def test_add(self):
@@ -356,12 +359,6 @@ class MaskingTest(jtu.JaxTestCase):
     out = duplicate([np.arange(3)], dict(n=2))
     assert onp.all(onp.array([0, 1, 0, 1]) == out[:4])
 
-    @jit
-    def broadcast_like(x, target):
-      return np.broadcast_to(x, target.shape)
-
-    self.check(lambda t: broadcast_like(0., t), ['n'], dict(n=2))
-
   def test_device_put(self):
     self.check(lambda x: np.device_put(x), ['n'], dict(n=np.array([2, 3])), 'n')
 
@@ -530,9 +527,19 @@ class MaskingTest(jtu.JaxTestCase):
 
   def test_where(self):
     self.check(lambda x: np.where(x < 0, x, np.zeros_like(x)), ['n'], dict(n=np.array([2, 3])), 'n')
-    self.check(lambda x: np.where(x < 0, x, 0.), ['n'], dict(n=np.array([2, 3])), 'n')
-    self.check(lambda x: np.where(x < 0, 0., x), ['n'], dict(n=np.array([2, 3])), 'n')
-    self.check(lambda x: np.where(x < 0, 0., 0.), ['n'], dict(n=np.array([2, 3])), 'n')
+
+    message = (
+      "mask(jit(broadcast_in_dim))) is not supported yet. "
+      "Consider using jit(mask(broadcast_in_dim))." 
+      "If you are using np.where, consider disabling jit on jax.lax._where or "
+      "manually broadcasting arguments to the same shape.")
+
+    self.assertRaisesWithLiteralMatch(NotImplementedError, message,
+      lambda: self.check(lambda x: np.where(x < 0, x, 0.), ['n'], dict(n=np.array([2, 3])), 'n'))
+    self.assertRaisesWithLiteralMatch(NotImplementedError, message,
+      lambda: self.check(lambda x: np.where(x < 0, 0., x), ['n'], dict(n=np.array([2, 3])), 'n'))
+    self.assertRaisesWithLiteralMatch(NotImplementedError, message,
+      lambda: self.check(lambda x: np.where(x < 0, 0., 0.), ['n'], dict(n=np.array([2, 3])), 'n'))
 
   def test_split(self):
     self.check(lambda x: np.split(x, 2), ['2*n'], dict(n=np.array([4, 4])), ['n', 'n'], unpadded_vars=['n'])

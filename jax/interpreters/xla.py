@@ -67,7 +67,7 @@ def aval_to_xla_shape(aval):
     raise TypeError("No xla_shape_handler for type: {}".format(type(aval)))
 xla_shape_handlers = {}
 xla_shape_handlers[core.AbstractUnit] = lambda _: xc.Shape.tuple_shape(())
-xla_shape_handlers[ShapedArray] = lambda a: xc.Shape.array_shape(a.dtype, masking.padded_shape_as_value_if_tracing(a.shape))
+xla_shape_handlers[ShapedArray] = lambda a: xc.Shape.array_shape(a.dtype, a.shape)
 xla_shape_handlers[ConcreteArray] = lambda a: xc.Shape.array_shape(a.dtype, a.shape)
 
 def aval_to_result_handler(device, aval):
@@ -78,7 +78,6 @@ def aval_to_result_handler(device, aval):
 xla_result_handlers = {}
 xla_result_handlers[core.AbstractUnit] = lambda _, __: lambda _: core.unit
 def array_result_handler(device, aval):
-  aval.shape = masking.padded_shape_as_value(aval.shape)
   return partial(DeviceArray, raise_to_shaped(aval), device, lazy.array(aval.shape))
 xla_result_handlers[ShapedArray] = array_result_handler
 xla_result_handlers[ConcreteArray] = array_result_handler

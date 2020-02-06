@@ -2454,12 +2454,22 @@ def _broadcast_in_dim_masking_rule(padded_vals, logical_shapes, shape, broadcast
                           broadcast_dimensions=broadcast_dimensions)
 
 def _broadcast_in_dim_translation_rule(c, operand, shape, broadcast_dimensions):
-  shape = masking.padded_shape_as_value_if_tracing(shape)
+  if is_polymorphic(shape):
+    # TODO Unlike many other primitives,
+    #  broadcast_in_dim bakes the shape parameter into the XlaOp,
+    #  causing a failure if it is polymorphic.
+    #  Solution requires additional mechanism to translate polymorphic jaxprs.
+    raise NotImplementedError(
+      "mask(jit(broadcast_in_dim))) is not supported yet. "
+      "Consider using jit(mask(broadcast_in_dim))."
+      "If you are using np.where, consider disabling jit on jax.lax._where or "
+      "manually broadcasting arguments to the same shape.")
   return standard_translate(
     'broadcast_in_dim', c, operand, shape=shape,
     broadcast_dimensions=broadcast_dimensions)
 
-broadcast_in_dim_p = Primitive('broadcast_in_dim')
+broadcast_in_dim_p = standard_primitive(
+  _broadcast_in_dim_shape_rule, _input_dtype, 'broadcast_in_dim')
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
 ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
@@ -2672,7 +2682,8 @@ def _reshape_shape_rule(operand, new_sizes, dimensions, **unused_kwargs):
   if not onp.all(onp.greater_equal(new_sizes, 0)):
     msg = 'reshape new_sizes must all be positive, got {}.'
     raise TypeError(msg.format(new_sizes))
-  if prod(onp.shape(operand)) != prod(new_sizes):
+  if (prod(masking.padded_shape_as_value_if_tracing(onp.shape(operand))) !=
+      prod(masking.padded_shape_as_value_if_tracing(new_sizes))):
     msg = 'reshape total size must be unchanged, got new_sizes {} for shape {}.'
     raise TypeError(msg.format(new_sizes, onp.shape(operand)))
   if dimensions is not None:
@@ -2776,16 +2787,13 @@ masking.masking_rules[transpose_p] = _transpose_masking_rule
 
 
 def _select_shape_rule(pred, on_true, on_false):
-  pred_shape = masking.padded_shape_as_value_if_tracing(pred.shape)
-  on_true_shape = masking.padded_shape_as_value_if_tracing(on_true.shape)
-  on_false_shape = masking.padded_shape_as_value_if_tracing(on_false.shape)
-  if on_true_shape != on_false_shape:
+  if on_true.shape != on_false.shape:
     msg = "select on_true and on_false must have the same shape, got {} and {}."
-    raise TypeError(msg.format(on_true_shape, on_false_shape))
-  if pred_shape and pred_shape != on_true_shape:
+    raise TypeError(msg.format(on_true.shape, on_false.shape))
+  if pred.shape and pred.shape != on_true.shape:
     msg = ("select pred must be scalar or have the same shape as on_true and "
            "on_false, got pred shape {} for on_true and on_false of shape {}.")
-    raise TypeError(msg.format(pred_shape, on_true_shape))
+    raise TypeError(msg.format(pred.shape, on_true.shape))
   return on_true.shape
 
 def _select_dtype_rule(pred, on_true, on_false):
@@ -2833,8 +2841,7 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   if not onp.shape(on_true) == onp.shape(on_false) == ():
     on_true = batching.bdim_at_front(on_true, ot_bdim, size)
     on_false = batching.bdim_at_front(on_false, of_bdim, size)
-  assert (masking.padded_shape_as_value_if_tracing(on_true.shape) ==
-          masking.padded_shape_as_value_if_tracing(on_false.shape))
+  assert onp.shape(on_true) == onp.shape(on_false)
   if 0 < onp.ndim(pred) < onp.ndim(on_true):
     # vmapped function had a scalar pred with nonscalar args
     assert onp.ndim(pred) == 1
@@ -2846,7 +2853,11 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   return select(pred, on_true, on_false), 0
 
 def _select_masking_rule(padded_vals, logical_shapes):
-  return select(*padded_vals)
+  pred_shape, true_shape, false_shape = map(lambda x: masking.padded_shape_as_value(x.shape), padded_vals)
+  assert onp.array_equal(pred_shape, true_shape)
+  assert onp.array_equal(pred_shape, false_shape)
+  # ensure all arguments have the same, concrete shape:
+  return select(*(reshape(val, pred_shape) for val in padded_vals))
 
 select_p = standard_primitive(_select_shape_rule, _select_dtype_rule, 'select')
 ad.defjvp(select_p,

@@ -8,7 +8,7 @@ from .. import core
 from ..core import Trace, Tracer
 from ..util import safe_map, safe_zip, unzip2
 from ..abstract_arrays import ShapedArray, Poly, eval_polymorphic_shape, \
-  eval_poly
+  eval_poly, is_polymorphic
 from .. import linear_util as lu
 from . import polymorphic
 
@@ -51,15 +51,18 @@ def extend_shape_envs(logical_env, padded_env):
     shape_envs = prev
 
 def shape_as_value(shape):
+  assert is_tracing() or not is_polymorphic(shape)
   return eval_polymorphic_shape(shape, shape_envs.logical)
 
 def poly_as_value(dim):
+  assert is_tracing() or not type(dim) is Poly
   return eval_poly(dim, shape_envs.logical)
 
 def poly_as_value_if_tracing(dim):
   return poly_as_value(dim) if is_tracing() else dim
 
 def padded_shape_as_value(shape):
+  assert is_tracing() or not is_polymorphic(shape)
   return eval_polymorphic_shape(shape, shape_envs.padded)
 
 def padded_shape_as_value_if_tracing(shape):
@@ -133,7 +136,7 @@ class MaskTrace(Trace):
       avals = [t.aval for t in tracers]
       out = primitive.abstract_eval(*avals, **params)
       out_shape = [o.shape for o in out] if primitive.multiple_results else out.shape
-      logical_shapes = map(partial(eval_polymorphic_shape, values_dict=shape_envs.logical), polymorphic_shapes)
+      logical_shapes = map(shape_as_value, polymorphic_shapes)
       masking_rule = masking_rules.get(primitive)
       if masking_rule is None:
         raise NotImplementedError('Masking rule for {} not implemented yet.'.format(primitive))
