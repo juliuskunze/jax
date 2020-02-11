@@ -9,6 +9,10 @@
 | [**Install guide**](#installation)
 | [**Reference docs**](https://jax.readthedocs.io/en/latest/)
 
+**Announcement:** JAX 0.1.58 has dropped Python 2 support, and requires Python 3.5 or newer. See [CHANGELOG.md](https://github.com/google/jax/blob/master/CHANGELOG.md).
+
+## What is JAX?
+
 JAX is [Autograd](https://github.com/hips/autograd) and
 [XLA](https://www.tensorflow.org/xla),
 brought together for high-performance machine learning research.
@@ -343,22 +347,23 @@ we highly recommend reading the [Gotchas
 Notebook](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html).
 Some standouts:
 
+1. JAX transformations only work on [pure functions](https://en.wikipedia.org/wiki/Pure_function), which don't have side-effects and respect [referential transparency](https://en.wikipedia.org/wiki/Referential_transparency) (i.e. object identity testing with `is` isn't preserved). If you use a JAX transformation on an impure Python function, you might see an error like `Exception: Can't lift Traced...`  or `Exception: Different traces at same level`.
 1. [In-place mutating updates of
    arrays](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#%F0%9F%94%AA-In-Place-Updates), like `x[i] += y`, aren't supported, but [there are functional alternatives](https://jax.readthedocs.io/en/latest/jax.ops.html). Under a `jit`, those functional alternatives will reuse buffers in-place automatically.
-2. [Random numbers are
+1. [Random numbers are
    different](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#%F0%9F%94%AA-Random-Numbers), but for [good reasons](https://github.com/google/jax/blob/master/design_notes/prng.md).
-3. If you're looking for [convolution
+1. If you're looking for [convolution
    operators](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#%F0%9F%94%AA-Convolutions),
    they're in the `jax.lax` package.
-4. JAX enforces single-precision (32-bit, e.g. `float32`) values by default, and
+1. JAX enforces single-precision (32-bit, e.g. `float32`) values by default, and
    [to enable
    double-precision](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#Double-(64bit)-precision)
    (64-bit, e.g. `float64`) one needs to set the `jax_enable_x64` variable at
    startup (or set the environment variable `JAX_ENABLE_X64=True`).
-5. Some of NumPy's dtype promotion semantics involving a mix of Python scalars
+1. Some of NumPy's dtype promotion semantics involving a mix of Python scalars
    and NumPy types aren't preserved, namely `np.add(1, np.array([2],
    np.float32)).dtype` is `float64` rather than `float32`.
-6. Some transformations, like `jit`, [constrain how you can use Python control
+1. Some transformations, like `jit`, [constrain how you can use Python control
    flow](https://jax.readthedocs.io/en/latest/notebooks/Common_Gotchas_in_JAX.html#%F0%9F%94%AA-Control-Flow).
    You'll always get loud errors if something goes wrong. You might have to use
    [`jit`'s `static_argnums`
@@ -402,17 +407,17 @@ cloud VM), you can run
 ```bash
 # install jaxlib
 PYTHON_VERSION=cp37  # alternatives: cp35, cp36, cp37, cp38
-CUDA_VERSION=cuda92  # alternatives: cuda90, cuda92, cuda100, cuda101
+CUDA_VERSION=cuda92  # alternatives: cuda92, cuda100, cuda101, cuda102
 PLATFORM=linux_x86_64  # alternatives: linux_x86_64
 BASE_URL='https://storage.googleapis.com/jax-releases'
-pip install --upgrade $BASE_URL/$CUDA_VERSION/jaxlib-0.1.37-$PYTHON_VERSION-none-$PLATFORM.whl
+pip install --upgrade $BASE_URL/$CUDA_VERSION/jaxlib-0.1.38-$PYTHON_VERSION-none-$PLATFORM.whl
 
 pip install --upgrade jax  # install jax
 ```
 
 The library package name must correspond to the version of the existing CUDA
-installation you want to use, with `cuda101` for CUDA 10.1, `cuda100` for CUDA
-10.0, `cuda92` for CUDA 9.2, and `cuda90` for CUDA 9.0. To find your CUDA and
+installation you want to use, with `cuda102` for CUDA 10.2, `cuda101` for CUDA
+10.1, `cuda100` for CUDA 10.0, and `cuda92` for CUDA 9.2. To find your CUDA and
 CUDNN versions, you can run commands like these, depending on your CUDNN install
 path:
 
@@ -449,12 +454,12 @@ To cite this repository:
 ```
 
 In the above bibtex entry, names are in alphabetical order, the version number
-is intended to be that from [jax/version.py](../blob/master/jax/version.py), and
+is intended to be that from [jax/version.py](../master/jax/version.py), and
 the year corresponds to the project's open-source release.
 
 A nascent version of JAX, supporting only automatic differentiation and
 compilation to XLA, was described in a [paper that appeared at SysML
-2018](https://www.sysml.cc/doc/2018/146.pdf). We're currently working on
+2018](https://mlsys.org/Conferences/2019/doc/2018/146.pdf). We're currently working on
 covering JAX's ideas and capabilities in a more comprehensive and up-to-date
 paper.
 

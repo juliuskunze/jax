@@ -9,11 +9,13 @@ jax.scipy.linalg
 .. autosummary::
   :toctree: _autosummary
 
+   block_diag
    cho_factor
    cho_solve
    cholesky
    det
    eigh
+   expm
    inv
    lu
    lu_factor
@@ -50,6 +52,8 @@ jax.scipy.special
    erfc
    erfinv
    expit
+   gammainc
+   gammaincc
    gammaln
    i0e
    i1e
@@ -104,6 +108,19 @@ jax.scipy.stats.laplace
    logpdf
    pdf
 
+jax.scipy.stats.logistic
+~~~~~~~~~~~~~~~~~~~~~~~~
+.. automodule:: jax.scipy.stats.logistic
+.. autosummary::
+  :toctree: _autosummary
+
+   cdf
+   isf
+   logpdf
+   pdf
+   ppf
+   sf
+
 jax.scipy.stats.norm
 ~~~~~~~~~~~~~~~~~~~~
 .. automodule:: jax.scipy.stats.norm
@@ -114,6 +131,7 @@ jax.scipy.stats.norm
    logcdf
    logpdf
    pdf
+   ppf
 
 jax.scipy.stats.uniform
 ~~~~~~~~~~~~~~~~~~~~~~~
