@@ -2439,7 +2439,7 @@ def _broadcast_in_dim_batch_rule(batched_args, batch_dims, shape,
   new_broadcast_dimensions = (0,) + tuple(onp.add(1, broadcast_dimensions))
   return broadcast_in_dim(new_operand, new_shape, new_broadcast_dimensions), 0
 
-def _broadcast_abstract_eval(operand, shape, broadcast_dimensions):
+def _broadcast_in_dim_abstract_eval(operand, shape, broadcast_dimensions):
   if is_polymorphic(shape) and type(operand) is ConcreteArray:
     operand = ShapedArray(operand.shape, operand.dtype)
 
@@ -2473,7 +2473,7 @@ broadcast_in_dim_p = standard_primitive(
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
 ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
-broadcast_in_dim_p.def_abstract_eval(_broadcast_abstract_eval)
+broadcast_in_dim_p.def_abstract_eval(_broadcast_in_dim_abstract_eval)
 pe.custom_partial_eval_rules[broadcast_in_dim_p] = _jaxpr_process_primitive_without_lowering(broadcast_in_dim_p)
 masking.masking_rules[broadcast_in_dim_p] = _broadcast_in_dim_masking_rule
 xla.translations[broadcast_in_dim_p] = _broadcast_in_dim_translation_rule
