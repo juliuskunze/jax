@@ -346,10 +346,10 @@ call_partial_eval_rules: Dict[core.Primitive, Callable] = {}
 staged_out_calls: Set[core.Primitive] = set()
 
 
-def abstract_eval_fun(fun, *avals, **params):
+def abstract_eval_fun(fun, *avals, trace_type: Optional[Type[Trace]] = None, **params):
   pvals_in = [PartialVal.unknown(a) for a in avals]
   _, pvals_out, _ = trace_to_jaxpr(lu.wrap_init(fun, params), pvals_in,
-                                  instantiate=True, stage_out=True)
+                                  instantiate=True, stage_out=True, trace_type=trace_type)
   avals_out, _ = unzip2(pvals_out)
   for aval_out in avals_out:
     assert isinstance(aval_out, AbstractValue)  # instantiate=True

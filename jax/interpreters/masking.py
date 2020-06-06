@@ -18,7 +18,7 @@ from functools import partial
 from itertools import chain, product
 import operator as op
 import string
-from typing import Callable, Dict, Sequence, Union
+from typing import Callable, Dict, Sequence, Union, Tuple
 
 import numpy as onp
 
@@ -29,6 +29,7 @@ from ..core import Trace, Tracer
 from ..util import safe_map, safe_zip, unzip2, prod, wrap_name
 from ..abstract_arrays import ShapedArray
 from .. import linear_util as lu
+from ..interpreters.partial_eval import JaxprTrace
 
 map = safe_map
 zip = safe_zip
@@ -75,6 +76,13 @@ def shape_as_value(shape):
 def padded_shape_as_value(shape):
   assert is_tracing() or not is_polymorphic(shape)
   return eval_polymorphic_shape(shape, shape_envs.padded)
+
+def padded_poly_as_value(dim):
+  assert is_tracing() or not not type(dim) is Poly
+  return eval_poly(dim, shape_envs.padded)
+
+def ensure_padded_shape(shape):
+  return padded_shape_as_value(shape) if is_tracing() else shape
 
 def mask_fun(fun, logical_env, padded_env, in_vals, polymorphic_shapes):
   env_keys, padded_env_vals = unzip2(sorted(padded_env.items()))
@@ -350,7 +358,7 @@ class MaskTracer(Tracer):
 
   @property
   def dtype(self):
-    return self.val.dtype
+    return self.val.dtype if hasattr(self.val, 'dtype') else type(self.val)
 
   def is_pure(self):
     return all(type(poly) is not Poly or poly.is_constant
@@ -461,3 +469,20 @@ def check_shapes(specs, spec_tree, shapes, tree, message_prefix="Output"):
     specs = tree_unflatten(spec_tree, specs)
     shapes = tree_unflatten(tree, shapes)
     raise ShapeError(f"{message_prefix} shapes should be {specs} but are {shapes}.")
+
+class PolymorphicJaxprTrace(JaxprTrace):
+  pass
+
+polymorphic_trace_types: Tuple = (PolymorphicJaxprTrace, MaskTrace)
+
+def ensure_traced(operand):
+  if isinstance(operand, Tracer):
+    return operand
+
+  def has_poly_trace(master):
+    return issubclass(master.trace_type, polymorphic_trace_types)
+
+  masters = reversed(core.trace_state.trace_stack.upward)
+  master = next(filter(has_poly_trace, masters))
+  trace = master.trace_type(master, core.cur_sublevel())
+  return trace.pure(operand)

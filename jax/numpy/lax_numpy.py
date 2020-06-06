@@ -2223,7 +2223,7 @@ def identity(n, dtype=None):
 def arange(start, stop=None, step=None, dtype=None):
   lax._check_user_dtype_supported(dtype, "arange")
   if stop is None and step is None:
-    dtype = dtype or _dtype(start)
+    dtype = dtype or (int64 if type(start) is Poly else _dtype(start))
     return lax.iota(dtype, start) # avoids materializing
   else:
     return array(np.arange(start, stop=stop, step=step, dtype=dtype))

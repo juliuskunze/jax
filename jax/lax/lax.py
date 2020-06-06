@@ -21,7 +21,7 @@ import itertools
 import operator
 import string
 from typing import (Any, Callable, List, NamedTuple, Optional, Sequence, Union,
-                    Tuple, Type)
+                    Tuple, Dict)
 import warnings
 
 import numpy as onp
@@ -36,7 +36,7 @@ from .. import dtypes
 from .. import lazy
 from .. import lib
 from ..config import flags
-from ..core import Primitive, _canonicalize_dimension
+from ..core import Primitive, unit, _canonicalize_dimension
 from ..abstract_arrays import (UnshapedArray, ShapedArray, ConcreteArray,
                                AbstractToken, array_types, make_shaped_array,
                                raise_to_shaped, abstract_token, canonicalize_shape)
@@ -46,7 +46,7 @@ from ..interpreters import pxla
 from ..interpreters import ad
 from ..interpreters import batching
 from ..interpreters import masking
-from ..util import curry, cache, safe_zip, unzip2, prod, safe_map
+from ..util import curry, cache, safe_zip, unzip2, prod, safe_map, curry
 from ..tree_util import build_tree, tree_unflatten, tree_map
 from ..lib import pytree
 from ..lib import xla_bridge
@@ -675,6 +675,9 @@ def broadcast_in_dim(operand: Array, shape: Shape,
     operand, shape=shape, broadcast_dimensions=broadcast_dimensions)
   if onp.ndim(operand) == len(shape) and not len(broadcast_dimensions):
     return operand
+  # TODO(mattjj): Remove this once omnistaging is default:
+  if masking.is_polymorphic(shape):
+    operand = masking.ensure_traced(operand)
   return broadcast_in_dim_p.bind(
       operand, shape=tuple(shape),
       broadcast_dimensions=tuple(broadcast_dimensions))
@@ -1262,17 +1265,64 @@ def full(shape: Shape, fill_value: Array, dtype: Optional[DType] = None) -> Arra
   fill_value = xla.device_put_p.bind(convert_element_type(fill_value, dtype))
   return broadcast(fill_value, shape)
 
+@curry
+def _jaxpr_process_primitive_without_lowering(prim, trace, *tracers, **params):
+  # Like JaxprTrace.process_primitive but without lowering out of the trace.
+  avals = [t.aval for t in tracers]
+  out_aval = prim.abstract_eval(*avals, **params)
+  out_tracer = pe.JaxprTracer(trace, pe.PartialVal((out_aval, unit)), None)
+  out_tracer.recipe = pe.new_eqn_recipe(tracers, [out_tracer], prim, params)
+  return out_tracer
+
+def lazy_primitive_bind(name: str, fun: Callable[..., lazy.LazyExpr]) -> Callable:
+  def shape(kwargs):
+    return kwargs['shape'] if 'shape' in kwargs else (kwargs['size'],)
+
+  def impl(**kwargs):
+    aval = ShapedArray(shape(kwargs), kwargs['dtype'])
+    lazy_expr = fun(**kwargs)
+    return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+
+  def abstract_eval(**kwargs):
+    if masking.is_polymorphic(shape(kwargs)):
+      return ShapedArray(shape(kwargs), kwargs['dtype'])
+    return ConcreteArray(impl(**kwargs))
+
+  def masking_rule(padded_vals, logical_shapes, **kwargs):
+    padded_shape = masking.padded_shape_as_value(shape(kwargs))
+    if 'shape' in kwargs:
+      kwargs['shape'] = padded_shape
+    else:
+      padded_size, = padded_shape
+      kwargs['size'] = padded_size
+    return impl(**kwargs)
+
+  p = Primitive(name)
+  # For constant primitives of polymorphic shape, bind cannot fall back to impl.
+  # Instead, we need to trigger abstract_eval, returning an abstract value.
+  # This is achieved by providing a dummy arg wrapped in a masking trace and
+  # not lowering out of the trace:
+  def bind(**kwargs):
+    dummy = onp.array(0)
+    if masking.is_polymorphic(shape(kwargs)):
+      dummy = masking.ensure_traced(dummy)
+    return p.bind(dummy, **kwargs)
+  p.def_impl(lambda dummy, **kwargs: impl(**kwargs))
+  p.def_abstract_eval(lambda dummy, **kwargs: abstract_eval(**kwargs))
+  pe.custom_partial_eval_rules[p] = _jaxpr_process_primitive_without_lowering(p)
+  masking.masking_rules[p] = masking_rule
+  return bind
+
+iota_bind = lazy_primitive_bind('iota', lazy.iota)
+
 def iota(dtype: DType, size: int) -> Array:
   """Wraps XLA's `Iota
   <https://www.tensorflow.org/xla/operation_semantics#iota>`_
   operator.
   """
   size = size if type(size) is masking.Poly else int(size)
-  shape = canonicalize_shape((size,))
-  dtype = dtypes.canonicalize_dtype(dtype)
-  lazy_expr = lazy.iota(dtype, shape[0])
-  aval = ShapedArray(shape, dtype)
-  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+  return iota_bind(dtype=dtypes.canonicalize_dtype(dtype),
+                   size=_canonicalize_dimension(size))
 
 def broadcasted_iota(dtype: DType, shape: Shape, dimension: int) -> Array:
   """Convenience wrapper around ``iota``."""
@@ -1281,41 +1331,39 @@ def broadcasted_iota(dtype: DType, shape: Shape, dimension: int) -> Array:
   dimension = int(dimension)
   return broadcast_in_dim(iota(dtype, shape[dimension]), shape, [dimension])
 
+eye_bind = lazy_primitive_bind('eye', lazy.eye)
+
 def _eye(dtype: DType, shape: Shape, offset: int) -> Array:
   """Like numpy.eye, create a 2D array with ones on a diagonal.
 
   This function exists for creating lazy identity matrices; that is,
   materialization of the array is delayed and it may be fused into consumers to
   avoid materialization at all."""
-  N, M = tuple(map(int, shape))
-  offset = int(offset)
+  N, M = canonicalize_shape(shape)
   dtype = dtypes.canonicalize_dtype(dtype)
-  lazy_expr = lazy.eye(dtype, (N, M), offset)
-  aval = ShapedArray((N, M), dtype)
-  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+  return eye_bind(dtype=dtype, shape=(N, M), offset=int(offset))
+
+delta_bind = lazy_primitive_bind('delta', lambda dtype, shape, axes:
+  lazy.broadcast(lazy.delta(dtype, tuple(onp.take(shape, axes))), shape, axes))
 
 def _delta(dtype: DType, shape: Shape, axes: Sequence[int]) -> Array:
   """This function exists for creating lazy Kronecker delta arrays, particularly
   for use in jax.numpy.einsum to express traces. It differs from ``eye`` in that
   it can create arrays of any rank, but doesn't allow offsets."""
-  shape = tuple(map(int, shape))
+  shape = canonicalize_shape(shape)
   axes = tuple(map(int, axes))
   dtype = dtypes.canonicalize_dtype(dtype)
-  base_shape = tuple(onp.take(shape, axes))
-  lazy_expr = lazy.broadcast(lazy.delta(dtype, base_shape), shape, axes)
-  aval = ShapedArray(shape, dtype)
-  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+  return delta_bind(dtype=dtype, shape=shape, axes=axes)
+
+tri_bind = lazy_primitive_bind('tri', lazy.tri)
 
 def _tri(dtype: DType, shape: Shape, offset: int) -> Array:
   """Like numpy.tri, create a 2D array with ones below a diagonal.
   This function exists for creating lazy triangular matrices, particularly for
   use in jax.numpy.tri."""
-  N, M = tuple(map(int, shape))
-  offset = int(offset)
+  N, M = canonicalize_shape(shape)
   dtype = dtypes.canonicalize_dtype(dtype)
-  lazy_expr = lazy.tri(dtype, (N, M), offset)
-  aval = ShapedArray((N, M), dtype)
-  return xla.DeviceArray(aval, None, lazy_expr, xla.DeviceConstant())
+  return tri_bind(dtype=dtype, shape=(N, M), offset=int(offset))
 
 def stop_gradient(x):
   """Stops gradient computation.
@@ -2783,7 +2831,9 @@ def _broadcast_in_dim_shape_rule(operand, *, shape, broadcast_dimensions):
     msg = ('broadcast_in_dim broadcast_dimensions must be a subset of output '
            'dimensions, got {} for operand ndim {} and shape {}.')
     raise TypeError(msg.format(broadcast_dimensions, operand_ndim, shape))
-  if any(operand.shape[i] != 1 and operand.shape[i] != shape[broadcast_dimensions[i]]
+  op_shape = masking.ensure_padded_shape(onp.shape(operand))
+  shape_ = masking.ensure_padded_shape(shape)
+  if any(op_shape[i] != 1 and op_shape[i] != shape_[broadcast_dimensions[i]]
          for i in range(operand_ndim)):
       msg = ('broadcast_in_dim operand dimension sizes must either be 1, or be '
              'equal to their corresponding dimensions in the target broadcast shape; '
@@ -2812,11 +2862,48 @@ def _broadcast_in_dim_batch_rule(batched_args, batch_dims, *, shape,
   return broadcast_in_dim(new_operand, new_shape, new_broadcast_dimensions), 0
 
 
+def _broadcast_abstract_eval(operand, shape, broadcast_dimensions):
+  if masking.is_polymorphic(shape) and type(operand) is ConcreteArray:
+    operand = ShapedArray(operand.shape, operand.dtype)
+
+  return standard_abstract_eval(
+    broadcast_in_dim_p, _broadcast_in_dim_shape_rule, _input_dtype,
+    operand, shape=shape, broadcast_dimensions=broadcast_dimensions)
+
+def _broadcast_in_dim_masking_rule(padded_vals, logical_shapes, shape, broadcast_dimensions):
+  operand, = padded_vals
+  return broadcast_in_dim(operand,
+                          shape=masking.padded_shape_as_value(shape),
+                          broadcast_dimensions=broadcast_dimensions)
+
+def _broadcast_in_dim_translation_rule(c, operand, shape, broadcast_dimensions):
+  if masking.is_polymorphic(shape):
+    # TODO Unlike many other primitives, broadcast_in_dim bakes the shape
+    #  parameter into its XlaOp, causing failure on polymorphic shapes.
+    #  Fix requires a mechanism to translate polymorphic jaxprs, for now fail:
+    raise NotImplementedError(
+      "mask(jit(broadcast_in_dim))) is not supported yet. "
+      "Consider using jit(mask(broadcast_in_dim)) instead."
+      "If you are using np.where, consider disabling jit on jax.lax._where or "
+      "manually broadcasting arguments to the same shape.")
+  return standard_translate(
+    'broadcast_in_dim', c, operand, shape=shape,
+    broadcast_dimensions=broadcast_dimensions)
+
 broadcast_in_dim_p = standard_primitive(
     _broadcast_in_dim_shape_rule, _input_dtype, 'broadcast_in_dim')
 broadcast_in_dim_p.def_impl(_broadcast_in_dim_impl)
 ad.deflinear(broadcast_in_dim_p, _broadcast_in_dim_transpose_rule)
 batching.primitive_batchers[broadcast_in_dim_p] = _broadcast_in_dim_batch_rule
+broadcast_in_dim_p.def_abstract_eval(_broadcast_abstract_eval)
+masking.masking_rules[broadcast_in_dim_p] = _broadcast_in_dim_masking_rule
+xla.translations[broadcast_in_dim_p] = _broadcast_in_dim_translation_rule
+
+def _broadcast_in_dim_process_primitive(trace, *tracers, **params):
+  if masking.is_polymorphic(params['shape']):
+    return _jaxpr_process_primitive_without_lowering(broadcast_in_dim_p)(trace, *tracers, **params)
+  return trace.default_process_primitive(broadcast_in_dim_p, tracers, params)
+pe.custom_partial_eval_rules[broadcast_in_dim_p] = _broadcast_in_dim_process_primitive
 
 
 def _clamp_shape_rule(min, operand, max):
@@ -3140,7 +3227,8 @@ def _reshape_shape_rule(operand, *, new_sizes, dimensions):
   if not onp.all(onp.greater_equal(new_sizes, 0)):
     msg = 'reshape new_sizes must all be positive, got {}.'
     raise TypeError(msg.format(new_sizes))
-  if prod(onp.shape(operand)) != prod(new_sizes):
+  if (prod(masking.ensure_padded_shape(onp.shape(operand))) !=
+      prod(masking.ensure_padded_shape(new_sizes))):
     msg = 'reshape total size must be unchanged, got new_sizes {} for shape {}.'
     raise TypeError(msg.format(new_sizes, onp.shape(operand)))
   if dimensions is not None:
@@ -3307,11 +3395,12 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   return select(pred, on_true, on_false), 0
 
 def _select_masking_rule(padded_vals, logical_shapes):
-  pred_shape, true_shape, false_shape = [
-      masking.padded_shape_as_value(val.shape) for val in padded_vals]
+  pred_shape, true_shape, false_shape = map(
+    lambda x: masking.padded_shape_as_value(x.shape), padded_vals)
   assert onp.array_equal(pred_shape, true_shape)
   assert onp.array_equal(pred_shape, false_shape)
-  return select(*padded_vals)
+  # ensure all arguments have the same, concrete shape:
+  return select(*(reshape(val, pred_shape) for val in padded_vals))
 
 select_p = standard_primitive(_select_shape_rule, _select_dtype_rule, 'select')
 ad.defjvp(select_p,

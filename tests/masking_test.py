@@ -243,27 +243,19 @@ class MaskingTest(jtu.JaxTestCase):
     def times(x, y):
       return x * y
 
-    # TODO(shoyer): enable this check when broadcast_in_dim supports masking
-    with self.assertRaisesRegex(
-        NotImplementedError,
-        'Masking rule for broadcast_in_dim not implemented yet.'):
-      times([jnp.array([[1, 2], [3, 4], [5, 6]]), jnp.array([1, 2])],
-            dict(n=4, m=5))
-      # expected = np.array([[1, 2, 3], [8, 10, 12]])
-      # self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = times([jnp.array([[1, 2], [3, 4], [5, 6]]), jnp.array([1, 2])],
+          dict(n=4, m=5))
+    expected = np.array([[1, 4], [3, 8], [5, 12]])
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_stack(self):
     @partial(mask, in_shapes=['n','n'], out_shape='(2, n)')
     def stack(x, y):
       return jnp.stack([x, y], 0)
 
-    # TODO(shoyer): enable this check when broadcast_in_dim supports masking
-    with self.assertRaisesRegex(
-        NotImplementedError,
-        'Masking rule for broadcast_in_dim not implemented yet.'):
-      stack([jnp.array([1, 2, 3]), jnp.array([4, 5, 6])], dict(n=10))
-      # expected = np.array([[1, 2, 3], [4, 5, 6]])
-      # self.assertAllClose(ans, expected, check_dtypes=False)
+    ans = stack([jnp.array([1, 2, 3]), jnp.array([4, 5, 6])], dict(n=10))
+    expected = np.array([[1, 2, 3], [4, 5, 6]])
+    self.assertAllClose(ans, expected, check_dtypes=False)
 
   def test_monomorphic(self):
     @partial(mask, in_shapes=['(_, n)'], out_shape='')
@@ -608,7 +600,14 @@ class MaskingTest(jtu.JaxTestCase):
     # TODO needs fix for https://github.com/google/jax/issues/2155
 
   def test_broadcast_in_dim(self):
-    raise SkipTest
+    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
+    self.check(lambda x: -lax.broadcast_in_dim(np.zeros((1, 1)), shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2)),
+               ['(n, 1)'], '(3, n, 4)', dict(n=2), [(5, 1)], ['float_'], rand_default(self.rng()))
+
+  def test_broadcast_to(self):
+    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
+    self.check(lambda x: -jnp.broadcast_to(0, x.shape), ['n'], 'n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
 
   def test_destructure(self):
     def d(key):
@@ -620,6 +619,53 @@ class MaskingTest(jtu.JaxTestCase):
   def test_where(self):
     self.check(lambda x: jnp.where(x < 0, x, 0. * x), ['n'], 'n',
                {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
+    message = (
+      "mask(jit(broadcast_in_dim))) is not supported yet. "
+      "Consider using jit(mask(broadcast_in_dim)) instead."
+      "If you are using np.where, consider disabling jit on jax.lax._where or "
+      "manually broadcasting arguments to the same shape.")
+
+    self.assertRaisesWithLiteralMatch(
+      NotImplementedError, message,
+      lambda: self.check(lambda x: jnp.where(x < 0, x, 0.), ['n'], 'n',
+                         {'n': 2}, [(3,)], ['float_'], rand_default(self.rng())))
+    self.assertRaisesWithLiteralMatch(
+      NotImplementedError, message,
+      lambda: self.check(lambda x: jnp.where(x < 0, 0., x), ['n'], 'n',
+                         {'n': 2}, [(3,)], ['float_'], rand_default(self.rng())))
+    self.assertRaisesWithLiteralMatch(
+      NotImplementedError, message,
+      lambda: self.check(lambda x: jnp.where(x < 0, 0., 0.), ['n'], 'n',
+                         {'n': 2}, [(3,)], ['float_'], rand_default(self.rng())))
+
+  def test_zeros(self):
+    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
+    self.check(lambda x: -jnp.zeros(x.shape), ['n'], 'n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+  def test_ones(self):
+    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
+    self.check(lambda x: -jnp.ones(x.shape), ['n'], 'n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+  def test_arange(self):
+    self.check(lambda x: -jnp.arange(x.shape[0]), ['n'], 'n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+  def test_eye(self):
+    self.check(lambda x: -jnp.eye(x.shape[0], 2 * x.shape[0]), ['n'], 'n, 2*n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+  def test_tri(self):
+    self.check(lambda x: -jnp.tri(x.shape[0], 2 * x.shape[0]), ['n'], 'n, 2*n',
+               {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
+
+  def test_delta(self):
+    self.check(lambda x: -lax._delta(jnp.float32,
+      (x.shape[0], 2 * x.shape[0], 3 * x.shape[0]), axes=(0, 1)), ['n'],
+      'n, 2*n, 3*n', {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
 
   def test_split(self):
     raise SkipTest
