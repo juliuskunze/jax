@@ -381,6 +381,9 @@ class MaskTrace(Trace):
   def sublift(self, val):
     return MaskTracer(self, val.val, val.polymorphic_shape)
 
+  def new_instantiated_const(self, val):
+    return MaskTracer(self, val, onp.shape(val))
+
   def process_primitive(self, primitive, tracers, params):
     vals, polymorphic_shapes = unzip2((t.val, t.polymorphic_shape) for t in tracers)
     if primitive in shape_parameterized_primitive_rules:
@@ -485,4 +488,4 @@ def ensure_traced(operand):
   masters = reversed(core.trace_state.trace_stack.upward)
   master = next(filter(has_poly_trace, masters))
   trace = master.trace_type(master, core.cur_sublevel())
-  return trace.pure(operand)
+  return trace.new_instantiated_const(operand)

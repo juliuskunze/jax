@@ -600,12 +600,10 @@ class MaskingTest(jtu.JaxTestCase):
     # TODO needs fix for https://github.com/google/jax/issues/2155
 
   def test_broadcast_in_dim(self):
-    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
     self.check(lambda x: -lax.broadcast_in_dim(np.zeros((1, 1)), shape=(3, x.shape[0], 4), broadcast_dimensions=(1, 2)),
                ['(n, 1)'], '(3, n, 4)', dict(n=2), [(5, 1)], ['float_'], rand_default(self.rng()))
 
   def test_broadcast_to(self):
-    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
     self.check(lambda x: -jnp.broadcast_to(0, x.shape), ['n'], 'n',
                {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
 
@@ -641,12 +639,10 @@ class MaskingTest(jtu.JaxTestCase):
                          {'n': 2}, [(3,)], ['float_'], rand_default(self.rng())))
 
   def test_zeros(self):
-    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
     self.check(lambda x: -jnp.zeros(x.shape), ['n'], 'n',
                {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
 
   def test_ones(self):
-    core.skip_checks = True # TODO(j-towns): Fix check_jaxpr, remove this
     self.check(lambda x: -jnp.ones(x.shape), ['n'], 'n',
                {'n': 2}, [(3,)], ['float_'], rand_default(self.rng()))
 
